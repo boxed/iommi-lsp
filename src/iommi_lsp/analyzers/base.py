@@ -30,3 +30,12 @@ class Analyzer(Protocol):
 
     def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:
         """Return True if this diagnostic should be dropped."""
+
+    def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
+        """Diagnostics this analyzer wants to *add* for *uri*.
+
+        Default: none. Implement to inject framework-specific diagnostics
+        (e.g. iommi refinable validation) on top of whatever the backend
+        type checker found.
+        """
+        return []

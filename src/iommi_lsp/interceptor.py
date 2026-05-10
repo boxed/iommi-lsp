@@ -61,20 +61,21 @@ class DiagnosticInterceptor:
         diagnostics: list[Diagnostic] = list(params.get("diagnostics") or [])
 
         kept = self._filter(uri, diagnostics)
+        added = self._added(uri)
 
         _log.debug(
-            "publishDiagnostics uri=%s in=%d kept=%d dropped=%d",
+            "publishDiagnostics uri=%s in=%d kept=%d dropped=%d added=%d",
             uri,
             len(diagnostics),
             len(kept),
             len(diagnostics) - len(kept),
+            len(added),
         )
 
-        if len(kept) == len(diagnostics):
-            # No analyzer wanted to drop anything → forward verbatim.
+        if len(kept) == len(diagnostics) and not added:
             return body
 
-        params["diagnostics"] = kept
+        params["diagnostics"] = kept + added
         payload["params"] = params
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
@@ -87,6 +88,18 @@ class DiagnosticInterceptor:
                 continue
             kept.append(diag)
         return kept
+
+    def _added(self, uri: str) -> list[Diagnostic]:
+        out: list[Diagnostic] = []
+        for a in self.analyzers:
+            adder = getattr(a, "additional_diagnostics", None)
+            if adder is None:
+                continue
+            try:
+                out.extend(adder(uri))
+            except Exception:
+                _log.exception("analyzer %s additional_diagnostics crashed", getattr(a, "name", a))
+        return out
 
 
 # ---------------------------------------------------------------------------

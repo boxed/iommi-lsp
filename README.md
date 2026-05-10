@@ -29,8 +29,15 @@ uv tool install iommi-lsp     # or: pipx install iommi-lsp
 iommi-lsp                                    # spawns `ty server` from PATH
 iommi-lsp --ty-command "uvx ty server"       # uvx fallback
 iommi-lsp --workspace ./myproject            # eager indexing for debugging
-iommi-lsp index ./myproject                  # dump the model index and exit
+iommi-lsp index ./myproject                  # dump the Django model index and exit
+iommi-lsp graph build ./myproject            # reflect installed iommi -> .iommi-lsp-graph.json
 ```
+
+**For the iommi analyzer**, run `iommi-lsp graph build` once after installing
+or upgrading iommi in your project. The reflector imports iommi from the
+same Python interpreter that runs `iommi-lsp` (i.e. install both in your
+project's venv). The graph is a few hundred KB JSON in your workspace
+root; check it in or `.gitignore` it as you prefer.
 
 `iommi-lsp` writes diagnostics-side stderr logs; tune via
 `IOMMI_LSP_LOG=DEBUG` or `--log-level DEBUG`.
@@ -92,7 +99,30 @@ There's no first-party VS Code extension yet. The simplest path is the
 pattern: install a generic LSP-client extension and point it at
 `iommi-lsp`. A first-party extension is on the roadmap.
 
-## How the filter works
+## How the iommi analyzer works
+
+`iommi-lsp graph build` imports iommi in your venv and walks each
+`Refinable`-declaring class (`Table`, `Column`, `Form`, `Field`, …)
+transitively through `class_ref` and `members` edges. Every refinable
+gets one of six kinds:
+
+* `members` — open dict of typed values (`columns: Dict[str, Column]`)
+* `html_attrs` — the `attrs` special with `class` (str→bool) and `style`
+  (str→str) sub-namespaces
+* `class_ref` — chain steps into another refinable class (annotation
+  wins over runtime default, so `bulk: Optional[Form]` resolves to Form)
+* `namespace` — structured with known sub-keys
+* `open_namespace` — anything goes
+* `evaluated_scalar` / `scalar` — leaf
+
+At LSP time the analyzer finds every `Class(kw__chain=...)` call, splits
+the kwarg name on `__`, and walks the chain through the graph. Dead
+ends become `iommi-unknown-refinable` warnings pinned to the offending
+segment. Bias is toward false negatives — if anything is ambiguous
+(unknown root class, member with no typed value, custom user subclass
+not in the graph), we pass silently.
+
+## How the Django filter works
 
 For each `unresolved-attribute` diagnostic from `ty`:
 

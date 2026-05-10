@@ -19,6 +19,8 @@ from pathlib import Path
 
 from . import __version__, log, proxy
 from .analyzers.django import DjangoAnalyzer, build_index
+from .analyzers.iommi import IommiAnalyzer
+from .analyzers.iommi.build import GraphBuildError, build_for_workspace
 from .interceptor import DiagnosticInterceptor, EditorRequestSniffer
 
 
@@ -56,6 +58,34 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Build and print the Django model index for a workspace.",
     )
     idx.add_argument("path", type=Path, help="Workspace root to scan.")
+
+    graph = sub.add_parser(
+        "graph",
+        help="Build / inspect the iommi reflection graph.",
+    )
+    graph_sub = graph.add_subparsers(dest="graph_command", metavar="ACTION")
+    g_build = graph_sub.add_parser(
+        "build",
+        help="Reflect the installed iommi and write .iommi-lsp-graph.json.",
+    )
+    g_build.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=Path.cwd(),
+        help="Workspace root (default: cwd). Graph is written here.",
+    )
+    g_build.add_argument(
+        "--python",
+        default=None,
+        help="Python interpreter to invoke (default: this venv's interpreter).",
+    )
+    g_build.add_argument(
+        "--seeds",
+        default=None,
+        help="Comma-separated list of fully-qualified iommi class seeds. "
+             "Defaults to the public iommi exports.",
+    )
     return p
 
 
@@ -65,20 +95,30 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
         print("error: --ty-command must not be empty", file=sys.stderr)
         return 2
 
-    analyzer = DjangoAnalyzer(workspace_root=workspace or Path.cwd())
-    interceptor = DiagnosticInterceptor(analyzers=[analyzer])
+    root = workspace or Path.cwd()
+    django_analyzer = DjangoAnalyzer(workspace_root=root)
+    iommi_analyzer = IommiAnalyzer(workspace_root=root)
+    analyzers = [django_analyzer, iommi_analyzer]
+
+    interceptor = DiagnosticInterceptor(analyzers=analyzers)
+
+    async def workspace_seen(root: Path) -> None:
+        for a in analyzers:
+            await a.index(root)
+
+    async def file_changed(uri: str) -> None:
+        for a in analyzers:
+            await a.on_file_changed(uri)
+
     sniffer = EditorRequestSniffer(
-        on_workspace=analyzer.index,
-        on_file_changed=analyzer.on_file_changed,
+        on_workspace=workspace_seen,
+        on_file_changed=file_changed,
     )
 
     if workspace is not None:
-        # Eager build for explicit --workspace; the sniffer still listens
-        # for editor-side workspace changes but won't override.
-        asyncio.run(_eager_index_then_serve(
-            ty_command, analyzer, workspace, interceptor, sniffer
+        return asyncio.run(_eager_index_then_serve(
+            ty_command, analyzers, workspace, interceptor, sniffer
         ))
-        return 0
     return asyncio.run(proxy.run(
         ty_command,
         editor_to_ty_hook=sniffer,
@@ -87,14 +127,31 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
 
 
 async def _eager_index_then_serve(
-    ty_command, analyzer, workspace, interceptor, sniffer
+    ty_command, analyzers, workspace, interceptor, sniffer
 ) -> int:
-    await analyzer.index(workspace)
+    for a in analyzers:
+        await a.index(workspace)
     return await proxy.run(
         ty_command,
         editor_to_ty_hook=sniffer,
         ty_to_editor_hook=interceptor,
     )
+
+
+def _run_graph_build(path: Path, python: str | None, seeds: str | None) -> int:
+    if not path.exists():
+        print(f"error: {path} does not exist", file=sys.stderr)
+        return 2
+    kwargs: dict = {"python": python}
+    if seeds:
+        kwargs["seeds"] = tuple(s.strip() for s in seeds.split(",") if s.strip())
+    try:
+        out = build_for_workspace(path, **kwargs)
+    except GraphBuildError as e:
+        print(f"error: graph build failed: {e}", file=sys.stderr)
+        return 1
+    print(f"wrote {out}")
+    return 0
 
 
 def _run_index(path: Path) -> int:
@@ -113,6 +170,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "index":
             return _run_index(args.path)
+        if args.command == "graph":
+            if args.graph_command == "build":
+                return _run_graph_build(args.path, args.python, args.seeds)
+            print("usage: iommi-lsp graph build [path]", file=sys.stderr)
+            return 2
         return _run_proxy(args.ty_command, args.workspace)
     except KeyboardInterrupt:
         return 130
