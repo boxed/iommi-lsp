@@ -47,6 +47,7 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "exception": EXCEPTION_ATTRS,
     "fk_id": frozenset(),         # dynamic — see ModelInfo.fk_id_accessors
     "reverse": frozenset(),       # dynamic — see DjangoIndex.reverse_relations
+    "orm_lookup": frozenset(),    # dynamic — see DjangoAnalyzer.additional_diagnostics
 }
 
 

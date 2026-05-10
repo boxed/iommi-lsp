@@ -54,3 +54,22 @@ FK_LIKE_FIELD_NAMES: frozenset[str] = frozenset({
 ALWAYS_PRESENT: frozenset[str] = (
     MANAGER_ATTRS | META_ATTRS | PK_ATTRS | EXCEPTION_ATTRS
 )
+
+
+# Built-in ORM lookups + transforms recognised after a leaf field in a
+# ``filter()/exclude()/get()`` chain. Once we hit one of these we stop
+# validating (transforms can chain — e.g. ``pubdate__year__gte``) and let
+# everything past it through.
+ORM_LOOKUP_NAMES: frozenset[str] = frozenset({
+    # Comparison.
+    "exact", "iexact", "contains", "icontains", "in", "gt", "gte",
+    "lt", "lte", "startswith", "istartswith", "endswith", "iendswith",
+    "range", "isnull", "regex", "iregex", "search",
+    # Date/time transforms.
+    "year", "iso_year", "month", "day", "week", "week_day",
+    "iso_week_day", "quarter", "hour", "minute", "second",
+    "date", "time",
+    # Postgres array/JSON.
+    "overlap", "contained_by", "contains_any", "has_key", "has_keys",
+    "has_any_keys",
+})

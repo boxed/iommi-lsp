@@ -46,11 +46,14 @@ def test_related_names_explicit_and_default():
     article = "blog.models.Article"
 
     rev_author = idx.reverse_relations[author]
-    assert rev_author == {"articles"}
+    assert set(rev_author) == {"articles"}
+    assert rev_author["articles"] == article  # source: Article declares the FK
 
     rev_article = idx.reverse_relations[article]
     assert "comment_set" in rev_article          # FK with no related_name
+    assert rev_article["comment_set"] == "blog.models.Comment"
     assert "tags" in rev_article                  # M2M from Tag
+    assert rev_article["tags"] == "blog.models.Tag"
     assert "+" not in rev_article                 # disabled reverse not recorded
     assert "hiddenlink_set" not in rev_article    # not registered when related_name="+"
 

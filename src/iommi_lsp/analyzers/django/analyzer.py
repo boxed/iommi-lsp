@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 from ... import log
 from ..base import Analyzer, Diagnostic
+from . import lookup_walker
 from .index import (
     DjangoIndex,
     ModelInfo,
@@ -47,6 +48,22 @@ _QUERY_METHODS_RETURNING_INSTANCE = frozenset({
     "get", "first", "last", "earliest", "latest",
     "create", "get_or_create", "update_or_create",
 })
+
+# Manager methods that take ``field__lookup=...`` kwargs we want to validate.
+# Conservative set for v1 — these are the common, unambiguous cases.
+_LOOKUP_METHODS = frozenset({
+    "filter", "exclude", "get", "get_or_create", "update_or_create",
+})
+
+_MANAGER_NAMES = frozenset({"objects", "_default_manager", "_base_manager"})
+
+# Kwargs that some manager methods accept which are NOT field names
+# (e.g. `defaults={...}` to ``get_or_create``). Skipping them keeps the
+# scanner from raising spurious "unknown field" diagnostics.
+_METHOD_ONLY_KWARGS = frozenset({"defaults", "create_defaults"})
+
+_ORM_LOOKUP_DIAG_CODE = "django-unknown-orm-lookup"
+_ORM_LOOKUP_DIAG_SOURCE = "iommi-lsp"
 
 
 @dataclass
@@ -218,6 +235,81 @@ class DjangoAnalyzer:
             _log.exception("analyzer crashed; keeping the diagnostic")
             return False
 
+    def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
+        if not self.config.is_rule_enabled("orm_lookup"):
+            return []
+        if not self.django_index.models:
+            return []
+        path = _uri_to_path(uri)
+        if path is None or not path.exists():
+            return []
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return []
+        try:
+            return list(self._scan_lookups(parsed))
+        except Exception:
+            _log.exception("orm-lookup scanner crashed; emitting nothing")
+            return []
+
+    def _scan_lookups(self, parsed: _ParsedFile):
+        for node in ast.walk(parsed.tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in _LOOKUP_METHODS:
+                continue
+            model = self._root_manager_model(node.func.value)
+            if model is None:
+                continue
+            # Validate direct kwargs: `.filter(name__icontains=…)`.
+            yield from self._validate_kwargs(parsed, model, node.keywords)
+            # Validate kwargs nested in Q(...) positional args:
+            # `.filter(Q(a=1) | Q(b=2), …)`.
+            for arg in node.args:
+                for q_kwargs in _iter_q_kwargs(arg):
+                    yield from self._validate_kwargs(parsed, model, q_kwargs)
+
+    def _validate_kwargs(
+        self,
+        parsed: _ParsedFile,
+        model: ModelInfo,
+        kwargs: list[ast.keyword],
+    ):
+        for kw in kwargs:
+            if kw.arg is None:
+                continue   # **kwargs splat
+            if kw.arg in _METHOD_ONLY_KWARGS:
+                continue
+            chain = lookup_walker.split_chain(kw.arg)
+            result = lookup_walker.walk(self.django_index, model.qualname, chain)
+            if isinstance(result, lookup_walker.Problem):
+                diag = _problem_to_diagnostic(parsed.source, kw, chain, result)
+                if diag is not None:
+                    yield diag
+
+    def _root_manager_model(self, receiver: ast.AST) -> ModelInfo | None:
+        """Walk back through chained calls until we hit ``<Name>.<manager>``.
+
+        Returns the model if the leftmost receiver is recognised; ``None``
+        otherwise (which means we don't validate that call).
+        """
+        cur = receiver
+        # Peel off any chain of method calls: each call's func is an
+        # Attribute whose value is the previous receiver.
+        while isinstance(cur, ast.Call):
+            if not isinstance(cur.func, ast.Attribute):
+                return None
+            cur = cur.func.value
+        if not isinstance(cur, ast.Attribute):
+            return None
+        if cur.attr not in _MANAGER_NAMES:
+            return None
+        if not isinstance(cur.value, ast.Name):
+            return None
+        return self.django_index.lookup(cur.value.id)
+
 
 # ---------------------------------------------------------------------------
 # Helpers — kept module-level so they're easy to test in isolation later.
@@ -269,6 +361,129 @@ def _find_attribute_at(tree: ast.Module, range_: dict) -> ast.Attribute | None:
             best = node
             best_size = size
     return best
+
+
+def _is_q_call(call: ast.Call) -> bool:
+    """Recognise ``Q(...)`` and ``models.Q(...)`` / ``...Q(...)`` calls."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id == "Q"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "Q"
+    return False
+
+
+def _iter_q_kwargs(node: ast.AST):
+    """Yield the keyword lists of every Q(...) call reachable from *node*.
+
+    Walks through ``|`` / ``&`` (BinOp) and ``~`` (UnaryOp) since Q
+    expressions compose via boolean operators. Bare ``Q`` references
+    (variables, attribute access without a call) are ignored — we don't
+    follow data flow.
+    """
+    if isinstance(node, ast.Call):
+        if _is_q_call(node):
+            yield node.keywords
+            # Q(Q(a=1), b=2) — nested Q in positional args.
+            for sub in node.args:
+                yield from _iter_q_kwargs(sub)
+        return
+    if isinstance(node, ast.BoolOp):
+        for v in node.values:
+            yield from _iter_q_kwargs(v)
+        return
+    if isinstance(node, ast.BinOp):
+        yield from _iter_q_kwargs(node.left)
+        yield from _iter_q_kwargs(node.right)
+        return
+    if isinstance(node, ast.UnaryOp):
+        yield from _iter_q_kwargs(node.operand)
+        return
+
+
+def _problem_to_diagnostic(
+    source: str,
+    kw: ast.keyword,
+    chain: list[str],
+    problem: lookup_walker.Problem,
+) -> Diagnostic | None:
+    """Pin the diagnostic to the bad segment within the kwarg name."""
+    if kw.arg is None or kw.value is None:
+        return None
+    arg_name = kw.arg
+    line0 = (kw.value.lineno - 1) if kw.value.lineno else 0
+    lines = source.splitlines()
+    line_text = lines[line0] if 0 <= line0 < len(lines) else ""
+    # Anchor on `arg_name=` so a kwarg name that also appears earlier as
+    # a value (rare, but possible) doesn't mis-pin us.
+    needle = f"{arg_name}="
+    name_col = line_text.find(needle)
+    if name_col == -1:
+        name_col = line_text.find(arg_name)
+
+    if name_col == -1:
+        col_start = kw.value.col_offset or 0
+        col_end = col_start + 1
+        return _make_orm_diagnostic(
+            line0, col_start, col_end, _format_orm_message(problem), problem
+        )
+
+    sep = "__"
+    seg_offset = 0
+    for i, seg in enumerate(chain):
+        if i == problem.segment_index:
+            break
+        seg_offset += len(seg) + len(sep)
+
+    col_start = name_col + seg_offset
+    col_end = col_start + len(problem.bad_segment)
+    return _make_orm_diagnostic(
+        line0, col_start, col_end, _format_orm_message(problem), problem
+    )
+
+
+def _format_orm_message(problem: lookup_walker.Problem) -> str:
+    if problem.outcome == "unknown_field":
+        msg = (
+            f"unknown ORM field/relation {problem.bad_segment!r} on "
+            f"{problem.on_model}"
+        )
+        if problem.available:
+            hint = ", ".join(problem.available[:8])
+            if len(problem.available) > 8:
+                hint += ", …"
+            msg += f"  (available: {hint})"
+        return msg
+    if problem.outcome == "unknown_lookup":
+        return (
+            f"unknown ORM lookup {problem.bad_segment!r} after a leaf field "
+            f"on {problem.on_model}"
+        )
+    return f"invalid ORM lookup chain at {problem.bad_segment!r}"
+
+
+def _make_orm_diagnostic(
+    line: int,
+    col_start: int,
+    col_end: int,
+    message: str,
+    problem: lookup_walker.Problem,
+) -> Diagnostic:
+    return {
+        "code": _ORM_LOOKUP_DIAG_CODE,
+        "message": message,
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 2,   # warning — bias toward false negatives
+        "source": _ORM_LOOKUP_DIAG_SOURCE,
+        "data": {
+            "outcome": problem.outcome,
+            "on_model": problem.on_model,
+            "available": list(problem.available),
+        },
+    }
 
 
 def _enclosing_function(tree: ast.Module, target: ast.AST) -> ast.AST | None:

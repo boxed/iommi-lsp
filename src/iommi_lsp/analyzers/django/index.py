@@ -73,8 +73,13 @@ class ModelInfo:
 @dataclass
 class DjangoIndex:
     models: dict[str, ModelInfo] = field(default_factory=dict)
-    # target model qualname -> set of reverse attr names
-    reverse_relations: dict[str, set[str]] = field(default_factory=lambda: defaultdict(set))
+    # target model qualname -> {reverse attr name -> source model qualname}
+    # The source is the model that *declared* the FK/M2M whose reverse
+    # accessor lives on the target. Walkers need it to step through a
+    # reverse relation and continue field validation on the source model.
+    reverse_relations: dict[str, dict[str, str]] = field(
+        default_factory=lambda: defaultdict(dict)
+    )
     # simple-name index for fast receiver lookup (e.g. "User" -> [qualname, ...])
     by_simple_name: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
 
@@ -83,7 +88,11 @@ class DjangoIndex:
         self.by_simple_name[info.name].append(info.qualname)
 
     def reverse_attrs(self, model_qualname: str) -> set[str]:
-        return self.reverse_relations.get(model_qualname, set())
+        return set(self.reverse_relations.get(model_qualname, {}).keys())
+
+    def reverse_source(self, model_qualname: str, reverse_name: str) -> str | None:
+        """Source model qualname for a reverse accessor on *model_qualname*."""
+        return self.reverse_relations.get(model_qualname, {}).get(reverse_name)
 
     def lookup(self, simple_name: str) -> ModelInfo | None:
         """Return a model by simple class name; None if ambiguous or absent."""
@@ -106,7 +115,7 @@ class DjangoIndex:
                     if fi.related_name:
                         detail += f"  related_name={fi.related_name!r}"
                 lines.append(f"      {fname}: {fi.field_type}{detail}")
-            rev = sorted(self.reverse_relations.get(qualname, ()))
+            rev = sorted((self.reverse_relations.get(qualname) or {}).keys())
             if rev:
                 lines.append(f"      reverse: {', '.join(rev)}")
         return "\n".join(lines)
@@ -547,7 +556,7 @@ def assemble_index(
             if reverse_name == "+":
                 # Django convention: disables the reverse relation.
                 continue
-            index.reverse_relations[target].add(reverse_name)
+            index.reverse_relations[target][reverse_name] = info.qualname
 
     _log.info(
         "indexed %s: %d models, %d reverse relations",
