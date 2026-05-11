@@ -73,6 +73,32 @@ def test_unknown_lookup_is_flagged(analyzer_basic: DjangoAnalyzer, tmp_path: Pat
     assert line_text[d["range"]["start"]["character"]:d["range"]["end"]["character"]] == "notalookup"
 
 
+def test_email_field_lookup_startswith_vs_asd(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    # `email` is an EmailField (not FK/M2M), so the segment after `__` must be
+    # a real lookup. `startswith` is valid; `asd` is not.
+    valid = (
+        "from myapp.models import User\n"
+        "User.objects.filter(email__startswith='a')\n"
+    )
+    assert analyzer_basic.additional_diagnostics(_write(tmp_path, valid)) == []
+
+    invalid_src = (
+        "from myapp.models import User\n"
+        "User.objects.filter(email__asd='a')\n"
+    )
+    invalid_path = tmp_path / "bad.py"
+    invalid_path.write_text(invalid_src)
+    diags = analyzer_basic.additional_diagnostics(invalid_path.as_uri())
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["data"]["outcome"] == "unknown_lookup"
+    assert "asd" in d["message"]
+    line = invalid_src.splitlines()[d["range"]["start"]["line"]]
+    assert line[d["range"]["start"]["character"]:d["range"]["end"]["character"]] == "asd"
+
+
 def test_relation_traversal_validates(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
     src = (
         "from blog.models import Article\n"
@@ -407,6 +433,52 @@ def test_f_inside_q(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
     diags = analyzer_blog.additional_diagnostics(uri)
     assert len(diags) == 1
     assert diags[0]["data"]["on_model"] == "blog.models.Author"
+
+
+def test_text_provider_overrides_disk_content(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    # Simulate an unsaved buffer: the file on disk has valid code, but the
+    # editor's live buffer contains an invalid lookup. The analyzer should
+    # see the buffer, not the disk.
+    disk_src = (
+        "from myapp.models import User\n"
+        "User.objects.filter(username='ok')\n"
+    )
+    path = tmp_path / "u.py"
+    path.write_text(disk_src)
+    uri = path.as_uri()
+
+    # No buffer registered yet: disk content wins, no diagnostics.
+    assert analyzer_basic.additional_diagnostics(uri) == []
+
+    buffers: dict[str, str] = {}
+    analyzer_basic._text_provider = buffers.get
+    buffers[uri] = (
+        "from myapp.models import User\n"
+        "User.objects.filter(email__asasdd='a')\n"
+    )
+
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert diags[0]["data"]["outcome"] == "unknown_lookup"
+    assert "asasdd" in diags[0]["message"]
+
+
+def test_text_provider_used_when_file_absent_on_disk(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    # A brand-new untitled-but-open buffer that the user hasn't saved.
+    uri = (tmp_path / "untitled.py").as_uri()
+    buffers = {uri: (
+        "from myapp.models import User\n"
+        "User.objects.filter(email__asasdd='a')\n"
+    )}
+    analyzer_basic._text_provider = buffers.get
+
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "asasdd" in diags[0]["message"]
 
 
 def test_disabled_via_config(analyzer_basic: DjangoAnalyzer, tmp_path: Path):

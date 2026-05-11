@@ -31,8 +31,85 @@ _log = log.get("interceptor")
 
 PUBLISH_DIAGNOSTICS = "textDocument/publishDiagnostics"
 INITIALIZE = "initialize"
+DID_OPEN = "textDocument/didOpen"
 DID_CHANGE = "textDocument/didChange"
 DID_SAVE = "textDocument/didSave"
+DID_CLOSE = "textDocument/didClose"
+
+
+class DocumentStore:
+    """In-memory mirror of the editor's open buffers.
+
+    LSP's text-sync notifications (``didOpen``/``didChange``/``didClose``)
+    carry the *unsaved* document content; the file on disk lags the
+    editor by however long it's been since the user hit save. Analyzers
+    that want to validate what the user is *currently* looking at have
+    to read from this store, not from disk.
+    """
+
+    def __init__(self) -> None:
+        self._docs: dict[str, str] = {}
+
+    def get(self, uri: str) -> str | None:
+        return self._docs.get(uri)
+
+    def did_open(self, uri: str, text: str) -> None:
+        self._docs[uri] = text
+
+    def did_change(self, uri: str, content_changes: list[dict]) -> None:
+        text = self._docs.get(uri)
+        for change in content_changes:
+            if "range" not in change:
+                # Full-document sync — replaces everything.
+                text = change.get("text", "")
+                continue
+            if text is None:
+                # Incremental change against a buffer we never saw open.
+                # Shouldn't happen with a well-behaved client; bail.
+                _log.warning("incremental change for unknown uri %s; dropping", uri)
+                return
+            text = _apply_incremental_change(text, change)
+        if text is not None:
+            self._docs[uri] = text
+
+    def did_close(self, uri: str) -> None:
+        self._docs.pop(uri, None)
+
+
+def _apply_incremental_change(text: str, change: dict) -> str:
+    rng = change["range"]
+    start = _offset_from_lsp_position(text, rng["start"])
+    end = _offset_from_lsp_position(text, rng["end"])
+    return text[:start] + change.get("text", "") + text[end:]
+
+
+def _offset_from_lsp_position(text: str, pos: dict) -> int:
+    """Convert LSP ``{line, character}`` to a Python ``str`` offset.
+
+    LSP characters are UTF-16 code units by default (positionEncoding).
+    Non-BMP code points (e.g. emoji) count as 2 UTF-16 units. For ASCII
+    Python source — the overwhelming common case — this collapses to
+    straight character indexing.
+    """
+    target_line = int(pos.get("line", 0))
+    target_char = int(pos.get("character", 0))
+
+    offset = 0
+    line = 0
+    n = len(text)
+    while offset < n and line < target_line:
+        if text[offset] == "\n":
+            line += 1
+        offset += 1
+
+    char_units = 0
+    while offset < n and char_units < target_char:
+        ch = text[offset]
+        if ch == "\n":
+            break
+        char_units += 2 if ord(ch) > 0xFFFF else 1
+        offset += 1
+    return offset
 
 
 class DiagnosticInterceptor:
@@ -154,9 +231,11 @@ class EditorRequestSniffer:
         *,
         on_workspace: WorkspaceCallback | None = None,
         on_file_changed: ChangeCallback | None = None,
+        document_store: DocumentStore | None = None,
     ) -> None:
         self._on_workspace = on_workspace
         self._on_file_changed = on_file_changed
+        self._document_store = document_store
         self._workspace_seen = False
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -175,12 +254,48 @@ class EditorRequestSniffer:
             if root is not None:
                 self._workspace_seen = True
                 self._spawn(self._on_workspace(root))
-        elif method in (DID_CHANGE, DID_SAVE) and self._on_file_changed:
+        elif method == DID_OPEN:
+            self._handle_did_open(payload)
+        elif method == DID_CHANGE:
+            self._handle_did_change(payload)
+        elif method == DID_CLOSE:
+            self._handle_did_close(payload)
+        elif method == DID_SAVE and self._on_file_changed:
             doc = (payload.get("params") or {}).get("textDocument") or {}
             uri = _file_uri_or_none(doc.get("uri"))
             if uri:
                 self._spawn(self._on_file_changed(uri))
         return body
+
+    def _handle_did_open(self, payload: dict) -> None:
+        params = payload.get("params") or {}
+        doc = params.get("textDocument") or {}
+        uri = _file_uri_or_none(doc.get("uri"))
+        if not uri:
+            return
+        if self._document_store is not None:
+            self._document_store.did_open(uri, doc.get("text") or "")
+
+    def _handle_did_change(self, payload: dict) -> None:
+        params = payload.get("params") or {}
+        doc = params.get("textDocument") or {}
+        uri = _file_uri_or_none(doc.get("uri"))
+        if not uri:
+            return
+        if self._document_store is not None:
+            changes = params.get("contentChanges") or []
+            self._document_store.did_change(uri, list(changes))
+        if self._on_file_changed is not None:
+            self._spawn(self._on_file_changed(uri))
+
+    def _handle_did_close(self, payload: dict) -> None:
+        params = payload.get("params") or {}
+        doc = params.get("textDocument") or {}
+        uri = _file_uri_or_none(doc.get("uri"))
+        if not uri:
+            return
+        if self._document_store is not None:
+            self._document_store.did_close(uri)
 
     def _spawn(self, coro: Awaitable[None]) -> None:
         task = asyncio.create_task(_swallow(coro))

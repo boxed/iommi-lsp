@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from iommi_lsp.interceptor import EditorRequestSniffer
+from iommi_lsp.interceptor import DocumentStore, EditorRequestSniffer
 
 
 def _frame_body(payload: dict) -> bytes:
@@ -105,6 +105,107 @@ async def test_did_change_triggers_file_callback():
     await sniffer(body)
     await asyncio.sleep(0)
     assert seen == ["file:///tmp/p/foo.py"]
+
+
+@pytest.mark.asyncio
+async def test_document_store_tracks_open_change_close():
+    store = DocumentStore()
+    sniffer = EditorRequestSniffer(document_store=store)
+
+    await sniffer(_frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {
+            "uri": "file:///x.py", "languageId": "python",
+            "version": 1, "text": "line one\nline two\n",
+        }},
+    }))
+    assert store.get("file:///x.py") == "line one\nline two\n"
+
+    # Full-document sync replaces everything.
+    await sniffer(_frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": "file:///x.py", "version": 2},
+            "contentChanges": [{"text": "rewritten\n"}],
+        },
+    }))
+    assert store.get("file:///x.py") == "rewritten\n"
+
+    await sniffer(_frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didClose",
+        "params": {"textDocument": {"uri": "file:///x.py"}},
+    }))
+    assert store.get("file:///x.py") is None
+
+
+@pytest.mark.asyncio
+async def test_document_store_incremental_change():
+    store = DocumentStore()
+    sniffer = EditorRequestSniffer(document_store=store)
+
+    await sniffer(_frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {
+            "uri": "file:///x.py", "languageId": "python",
+            "version": 1, "text": "abc\ndef\nghi\n",
+        }},
+    }))
+
+    # Replace "def" on line 1 with "DEF".
+    await sniffer(_frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": "file:///x.py", "version": 2},
+            "contentChanges": [{
+                "range": {
+                    "start": {"line": 1, "character": 0},
+                    "end": {"line": 1, "character": 3},
+                },
+                "text": "DEF",
+            }],
+        },
+    }))
+    assert store.get("file:///x.py") == "abc\nDEF\nghi\n"
+
+
+@pytest.mark.asyncio
+async def test_document_store_incremental_change_sequence():
+    store = DocumentStore()
+    sniffer = EditorRequestSniffer(document_store=store)
+
+    await sniffer(_frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didOpen",
+        "params": {"textDocument": {
+            "uri": "file:///x.py", "languageId": "python",
+            "version": 1, "text": "hello world",
+        }},
+    }))
+
+    # Two edits applied in order: insert "X" at start, then delete the original "h".
+    # Result: "Xello world".
+    await sniffer(_frame_body({
+        "jsonrpc": "2.0", "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": "file:///x.py", "version": 2},
+            "contentChanges": [
+                {
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 0},
+                    },
+                    "text": "X",
+                },
+                {
+                    "range": {
+                        "start": {"line": 0, "character": 1},
+                        "end": {"line": 0, "character": 2},
+                    },
+                    "text": "",
+                },
+            ],
+        },
+    }))
+    assert store.get("file:///x.py") == "Xello world"
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import shlex
 import sys
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 
 from . import jsonrpc, log
 
@@ -82,6 +82,7 @@ async def run_with_streams(
     *,
     editor_to_ty_hook: Hook = _passthrough,
     ty_to_editor_hook: Hook = _passthrough,
+    env: Mapping[str, str] | None = None,
 ) -> int:
     """Run the proxy against pre-built editor streams. Returns ty's exit code.
 
@@ -94,6 +95,7 @@ async def run_with_streams(
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=None,  # let ty's stderr passthrough — useful for debugging
+        env=env,
     )
     assert proc.stdin is not None and proc.stdout is not None
 
@@ -136,6 +138,7 @@ async def run(
     *,
     editor_to_ty_hook: Hook = _passthrough,
     ty_to_editor_hook: Hook = _passthrough,
+    env: Mapping[str, str] | None = None,
 ) -> int:
     """Run the proxy on the process's stdio."""
     editor_reader, editor_writer = await _stdio_streams()
@@ -145,4 +148,5 @@ async def run(
         editor_writer,
         editor_to_ty_hook=editor_to_ty_hook,
         ty_to_editor_hook=ty_to_editor_hook,
+        env=env,
     )

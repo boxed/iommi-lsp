@@ -12,16 +12,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import shlex
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from . import __version__, log, proxy
 from .analyzers.django import DjangoAnalyzer, build_index
 from .analyzers.iommi import IommiAnalyzer
 from .analyzers.iommi.build import GraphBuildError, build_for_workspace
-from .interceptor import DiagnosticInterceptor, EditorRequestSniffer
+from .interceptor import DiagnosticInterceptor, DocumentStore, EditorRequestSniffer
+
+
+_log = log.get("cli")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -96,8 +100,13 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
         return 2
 
     root = workspace or Path.cwd()
-    django_analyzer = DjangoAnalyzer(workspace_root=root)
-    iommi_analyzer = IommiAnalyzer(workspace_root=root)
+    documents = DocumentStore()
+    django_analyzer = DjangoAnalyzer(
+        workspace_root=root, text_provider=documents.get,
+    )
+    iommi_analyzer = IommiAnalyzer(
+        workspace_root=root, text_provider=documents.get,
+    )
     analyzers = [django_analyzer, iommi_analyzer]
 
     interceptor = DiagnosticInterceptor(analyzers=analyzers)
@@ -113,21 +122,25 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
     sniffer = EditorRequestSniffer(
         on_workspace=workspace_seen,
         on_file_changed=file_changed,
+        document_store=documents,
     )
+
+    backend_env = _backend_env(root, os.environ)
 
     if workspace is not None:
         return asyncio.run(_eager_index_then_serve(
-            ty_command, analyzers, workspace, interceptor, sniffer
+            ty_command, analyzers, workspace, interceptor, sniffer, backend_env,
         ))
     return asyncio.run(proxy.run(
         ty_command,
         editor_to_ty_hook=sniffer,
         ty_to_editor_hook=interceptor,
+        env=backend_env,
     ))
 
 
 async def _eager_index_then_serve(
-    ty_command, analyzers, workspace, interceptor, sniffer
+    ty_command, analyzers, workspace, interceptor, sniffer, env,
 ) -> int:
     for a in analyzers:
         await a.index(workspace)
@@ -135,7 +148,51 @@ async def _eager_index_then_serve(
         ty_command,
         editor_to_ty_hook=sniffer,
         ty_to_editor_hook=interceptor,
+        env=env,
     )
+
+
+def _backend_env(
+    workspace: Path, current_env: Mapping[str, str]
+) -> Mapping[str, str]:
+    """Build the env for the backend (ty) subprocess.
+
+    Two adjustments vs. inheriting the parent env:
+
+    1. ``VIRTUAL_ENV`` (and ``PATH``) is set to the workspace's ``.venv``
+       (or ``venv``) when present and the parent env doesn't already have
+       a valid ``VIRTUAL_ENV``. Editors that launch iommi-lsp via wrapper
+       scripts (uv tool, pipx) often strip or overwrite ``VIRTUAL_ENV``,
+       leaving ty unable to find the workspace's installed packages.
+    2. The directory holding this Python interpreter is *appended* to
+       ``PATH``. When iommi-lsp is installed as a uv tool, the bundled
+       ``ty`` lives next to ``sys.executable`` but isn't on the editor's
+       PATH; this lets us find it as a last resort.
+    """
+    new_env = dict(current_env)
+
+    existing = current_env.get("VIRTUAL_ENV")
+    if existing and (Path(existing) / "bin" / "python").exists():
+        _log.info("inherited VIRTUAL_ENV=%s", existing)
+    else:
+        for candidate_name in (".venv", "venv"):
+            candidate = workspace / candidate_name
+            if (candidate / "bin" / "python").exists():
+                new_env["VIRTUAL_ENV"] = str(candidate)
+                new_env["PATH"] = str(candidate / "bin") + os.pathsep + new_env.get("PATH", "")
+                new_env.pop("PYTHONHOME", None)
+                _log.info("injecting VIRTUAL_ENV=%s for backend", candidate)
+                break
+        else:
+            _log.info("no venv found at %s/.venv or %s/venv", workspace, workspace)
+
+    own_bin = str(Path(sys.executable).parent)
+    path_parts = new_env.get("PATH", "").split(os.pathsep)
+    if own_bin not in path_parts:
+        new_env["PATH"] = (new_env.get("PATH", "") + os.pathsep + own_bin).lstrip(os.pathsep)
+        _log.info("appended %s to PATH (bundled-backend fallback)", own_bin)
+
+    return new_env
 
 
 def _run_graph_build(path: Path, python: str | None, seeds: str | None) -> int:

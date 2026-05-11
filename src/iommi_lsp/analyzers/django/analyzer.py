@@ -18,6 +18,7 @@ suppress a real bug.
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -93,6 +94,7 @@ class DjangoAnalyzer:
         workspace_root: Path,
         django_index: DjangoIndex | None = None,
         config: "Config | None" = None,
+        text_provider: Callable[[str], str | None] | None = None,
     ) -> None:
         # Lazy import — config.py pulls in this package via magic.py and we
         # need to break the cycle.
@@ -101,6 +103,7 @@ class DjangoAnalyzer:
         self.workspace_root = workspace_root
         self.django_index: DjangoIndex = django_index or DjangoIndex()
         self.config: "Config" = config or DEFAULT_CONFIG
+        self._text_provider = text_provider
         self._cache: dict[str, _ParsedFile] = {}
         self._scrapes: dict[Path, _FileScrape] = {}
 
@@ -149,18 +152,31 @@ class DjangoAnalyzer:
         return self._attr_is_magic(model, attr_name)
 
     def _parse(self, uri: str, path: Path) -> _ParsedFile | None:
+        source = self._source_for(uri, path)
+        if source is None:
+            return None
         cached = self._cache.get(uri)
-        if cached is not None:
+        if cached is not None and cached.source == source:
             return cached
         try:
-            source = path.read_text(encoding="utf-8")
             tree = ast.parse(source, filename=str(path))
-        except (OSError, UnicodeDecodeError, SyntaxError) as e:
+        except SyntaxError as e:
             _log.debug("could not parse %s: %s", path, e)
             return None
         parsed = _ParsedFile(tree=tree, source=source)
         self._cache[uri] = parsed
         return parsed
+
+    def _source_for(self, uri: str, path: Path) -> str | None:
+        if self._text_provider is not None:
+            text = self._text_provider(uri)
+            if text is not None:
+                return text
+        try:
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            _log.debug("could not read %s: %s", path, e)
+            return None
 
     def _resolve_receiver_model(
         self, receiver: ast.AST, tree: ast.Module
@@ -252,7 +268,7 @@ class DjangoAnalyzer:
         if not self.django_index.models:
             return []
         path = _uri_to_path(uri)
-        if path is None or not path.exists():
+        if path is None:
             return []
         parsed = self._parse(uri, path)
         if parsed is None:
