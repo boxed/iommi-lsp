@@ -82,7 +82,9 @@ def _diagnose(workspace: Path, source: str) -> list[dict]:
 def test_no_graph_means_no_diagnostics(tmp_path: Path):
     f = tmp_path / "usage.py"
     f.write_text("from iommi import Table\nTable(bogus=1)\n")
-    a = IommiAnalyzer(workspace_root=tmp_path)
+    # Disable auto-build so the test really exercises "no graph" — in CI
+    # iommi is importable so an in-process build would otherwise succeed.
+    a = IommiAnalyzer(workspace_root=tmp_path, auto_build=False)
     asyncio.run(a.index(tmp_path))
     assert a.additional_diagnostics(f.as_uri()) == []
 

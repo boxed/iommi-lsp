@@ -28,12 +28,49 @@ def build_in_subprocess(
     python: str | None = None,
     seeds: list[str] | tuple[str, ...] = DEFAULT_SEEDS,
     timeout: float = 60.0,
+    inject_iommi_lsp_path: bool = True,
 ) -> IommiGraph:
+    """Run the reflector in a subprocess and return the resulting graph.
+
+    When *inject_iommi_lsp_path* is true (the default, used by the
+    analyzer's auto-build), the subprocess is invoked with iommi_lsp's
+    install directory prepended to ``sys.path`` so it can be imported
+    even when the target Python doesn't have iommi_lsp installed —
+    the common case for `uv tool install`-style isolated installs of
+    iommi-lsp running against the user's project venv. The target
+    Python still needs iommi (and Django) on its own.
+    """
     py = python or sys.executable
-    args = [py, "-m", "iommi_lsp.analyzers.iommi.reflect"]
-    if seeds and tuple(seeds) != DEFAULT_SEEDS:
-        args += ["--seeds", ",".join(seeds)]
-    _log.info("running graph builder: %s", " ".join(args))
+
+    if inject_iommi_lsp_path:
+        import iommi_lsp as _iommi_lsp_pkg
+        # `__file__` of the package = .../site-packages/iommi_lsp/__init__.py
+        # so the parent of `iommi_lsp` (i.e. site-packages) is the dir we
+        # need on sys.path for `import iommi_lsp` to work.
+        iommi_lsp_root = str(Path(_iommi_lsp_pkg.__file__).parent.parent)
+        seed_arg = ""
+        if seeds and tuple(seeds) != DEFAULT_SEEDS:
+            seed_arg = (
+                f"\nimport sys as _s; _s.argv = ['reflect', '--seeds', "
+                f"{','.join(seeds)!r}]\n"
+            )
+        bootstrap = (
+            f"import sys; sys.path.insert(0, {iommi_lsp_root!r})"
+            f"{seed_arg}\n"
+            "from iommi_lsp.analyzers.iommi.reflect import main; "
+            "raise SystemExit(main())"
+        )
+        args = [py, "-c", bootstrap]
+        _log.info(
+            "running graph builder (sys.path bridged): %s -c <bootstrap from %s>",
+            py, iommi_lsp_root,
+        )
+    else:
+        args = [py, "-m", "iommi_lsp.analyzers.iommi.reflect"]
+        if seeds and tuple(seeds) != DEFAULT_SEEDS:
+            args += ["--seeds", ",".join(seeds)]
+        _log.info("running graph builder: %s", " ".join(args))
+
     try:
         proc = subprocess.run(
             args,

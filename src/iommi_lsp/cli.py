@@ -110,7 +110,11 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
         workspace_root=root, text_provider=documents.get,
     )
     iommi_analyzer = IommiAnalyzer(
-        workspace_root=root, text_provider=documents.get,
+        workspace_root=root,
+        text_provider=documents.get,
+        # Lets the iommi analyzer offer ``columns__<model_field>``
+        # completions when the call carries ``auto__model=Model``.
+        django_index_provider=lambda: django_analyzer.django_index,
     )
     analyzers = [django_analyzer, iommi_analyzer]
 
