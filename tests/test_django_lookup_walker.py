@@ -126,6 +126,28 @@ def test_m2m_reverse_traversal(index):
     assert walk(index, "x.Article", ["tags", "name"]) is OK
 
 
+def test_m2m_in_lookup_is_valid(index):
+    # `Article.objects.filter(tags__in=[tag1, tag2])` — m2m + IN lookup
+    # filters by PK. The relation acts as a leaf, no field traversal.
+    assert walk(index, "x.Article", ["tags", "in"]) is OK
+
+
+def test_fk_in_lookup_is_valid(index):
+    # `Article.objects.filter(author__in=[u1, u2])`.
+    assert walk(index, "x.Article", ["author", "in"]) is OK
+
+
+def test_fk_isnull_lookup_is_valid(index):
+    # `Article.objects.filter(author__isnull=True)`.
+    assert walk(index, "x.Article", ["author", "isnull"]) is OK
+
+
+def test_relation_traversal_still_validates_target_after_in_check(index):
+    # `tags__name__icontains` should still walk into Tag.name, not be
+    # short-circuited by the lookup check.
+    assert walk(index, "x.Article", ["tags", "name", "icontains"]) is OK
+
+
 def test_transform_chain_passes(index):
     # Date transform + lookup — accept everything past the first lookup.
     assert walk(index, "x.Article", ["pubdate", "year", "gte"]) is OK

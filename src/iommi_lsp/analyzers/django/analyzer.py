@@ -288,7 +288,7 @@ class DjangoAnalyzer:
             method = node.func.attr
             if method not in _LOOKUP_METHODS and method not in _FIELD_PATH_METHODS:
                 continue
-            model = self._root_manager_model(node.func.value)
+            model = self._root_manager_model(node.func.value, parsed.tree)
             if model is None:
                 continue
             if method in _LOOKUP_METHODS:
@@ -374,11 +374,28 @@ class DjangoAnalyzer:
                 if diag is not None:
                     yield diag
 
-    def _root_manager_model(self, receiver: ast.AST) -> ModelInfo | None:
-        """Walk back through chained calls until we hit ``<Name>.<manager>``.
+    def _root_manager_model(
+        self,
+        receiver: ast.AST,
+        tree: ast.Module | None = None,
+        visited: frozenset[str] = frozenset(),
+    ) -> ModelInfo | None:
+        """Walk back through chained calls until we hit a manager-rooted form.
+
+        Recognises three rooted shapes:
+
+        * ``Model.<manager>`` — the canonical case (``User.objects``).
+        * ``<dotted>.Model.<manager>`` — module-qualified access
+          (``myapp.models.User.objects``); the rightmost segment is used
+          as a simple-name lookup, which the index naturally
+          ambiguity-protects.
+        * A bare local variable previously assigned from one of the
+          above, possibly through queryset-returning chains
+          (``qs = User.objects.all(); qs.filter(...)``).
 
         Returns the model if the leftmost receiver is recognised; ``None``
-        otherwise (which means we don't validate that call).
+        otherwise (which means we don't validate that call). The
+        ``visited`` set guards against self-referential assignment loops.
         """
         cur = receiver
         # Peel off any chain of method calls: each call's func is an
@@ -387,13 +404,63 @@ class DjangoAnalyzer:
             if not isinstance(cur.func, ast.Attribute):
                 return None
             cur = cur.func.value
-        if not isinstance(cur, ast.Attribute):
+
+        # `<…>.<manager>` — direct or module-qualified.
+        if isinstance(cur, ast.Attribute):
+            if cur.attr not in _MANAGER_NAMES:
+                return None
+            owner = cur.value
+            if isinstance(owner, ast.Name):
+                return self.django_index.lookup(owner.id)
+            if isinstance(owner, ast.Attribute):
+                # `models.User.objects` / `app.models.User.objects`.
+                return self.django_index.lookup(owner.attr)
             return None
-        if cur.attr not in _MANAGER_NAMES:
-            return None
-        if not isinstance(cur.value, ast.Name):
-            return None
-        return self.django_index.lookup(cur.value.id)
+
+        # Bare name — could be a local queryset variable.
+        if isinstance(cur, ast.Name) and tree is not None:
+            if cur.id in visited:
+                return None
+            return self._resolve_local_queryset_model(
+                cur.id, cur, tree, visited | {cur.id}
+            )
+
+        return None
+
+    def _resolve_local_queryset_model(
+        self,
+        var_name: str,
+        use_site: ast.AST,
+        tree: ast.Module,
+        visited: frozenset[str],
+    ) -> ModelInfo | None:
+        """Resolve a local variable to the model its queryset is bound to.
+
+        Walks same-function assignments preceding *use_site*; the most
+        recent successfully-resolved RHS wins. Recursion is bounded by
+        *visited* (see :meth:`_root_manager_model`).
+        """
+        scope = _enclosing_function(tree, use_site)
+        if scope is None:
+            scope = tree
+        last_match: ModelInfo | None = None
+        use_pos = (
+            getattr(use_site, "lineno", 0),
+            getattr(use_site, "col_offset", 0),
+        )
+        for stmt in ast.walk(scope):
+            if not isinstance(stmt, ast.Assign):
+                continue
+            if (stmt.lineno, stmt.col_offset) >= use_pos:
+                continue
+            for tgt in stmt.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == var_name:
+                    inferred = self._root_manager_model(
+                        stmt.value, tree, visited
+                    )
+                    if inferred is not None:
+                        last_match = inferred
+        return last_match
 
 
 # ---------------------------------------------------------------------------

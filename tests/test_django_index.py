@@ -14,7 +14,8 @@ CORPUS = Path(__file__).parent / "corpus"
 
 def test_basic_django_models_discovered():
     idx = build_index(CORPUS / "basic_django")
-    assert set(idx.models) == {
+    workspace_models = {q for q, m in idx.models.items() if not m.is_builtin}
+    assert workspace_models == {
         "myapp.models.User",
         "myapp.models.Profile",
         "myapp.models.WithExplicitPK",
@@ -84,6 +85,52 @@ def test_abstract_base_inheritance():
 
     # Book inherits from Timestamped (transitive Model classification).
     assert "library.models.NotAModel" not in idx.models
+
+
+def test_abstract_base_fields_propagate_to_subclass():
+    idx = build_index(CORPUS / "abstract_base")
+    book = idx.models["library.models.Book"]
+    # `created`/`updated` are declared on the abstract Timestamped base
+    # and must surface as fields on the concrete Book subclass — Django's
+    # metaclass does the same copy at runtime.
+    assert "created" in book.fields
+    assert "updated" in book.fields
+    assert "title" in book.fields
+
+
+def test_builtin_contrib_models_indexed():
+    idx = build_index(CORPUS / "basic_django")
+    # The stub injects django.contrib.auth.User et al into every index,
+    # marked with is_builtin so workspace models can still shadow them.
+    auth_user = idx.models.get("django.contrib.auth.models.User")
+    assert auth_user is not None
+    assert auth_user.is_builtin is True
+    # Inherited fields from AbstractUser propagate.
+    assert "email" in auth_user.fields
+    assert "username" in auth_user.fields
+    # ContentType and Session are also indexed.
+    assert "django.contrib.contenttypes.models.ContentType" in idx.models
+    assert "django.contrib.sessions.models.Session" in idx.models
+
+
+def test_workspace_model_shadows_builtin(tmp_path: Path):
+    # Workspace defines a `User` model. Even though the contrib stub
+    # also has a `User`, `lookup('User')` returns the workspace one.
+    (tmp_path / "myapp").mkdir()
+    (tmp_path / "myapp" / "__init__.py").write_text("")
+    (tmp_path / "myapp" / "models.py").write_text(
+        "from django.contrib.auth.models import AbstractUser\n"
+        "from django.db import models\n"
+        "class User(AbstractUser):\n"
+        "    extra = models.CharField(max_length=10)\n"
+    )
+    idx = build_index(tmp_path)
+    info = idx.lookup("User")
+    assert info is not None
+    assert info.qualname == "myapp.models.User"
+    # AbstractUser fields inherited, plus the local `extra`.
+    assert "email" in info.fields
+    assert "extra" in info.fields
 
 
 def test_summary_renders_without_error():

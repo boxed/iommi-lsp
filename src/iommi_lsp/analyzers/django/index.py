@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ... import log
+from .builtins import BUILTIN_MODULES
 from .magic import FK_LIKE_FIELD_NAMES, RELATION_FIELD_NAMES
 
 
@@ -51,6 +52,7 @@ class ModelInfo:
     fields: dict[str, FieldInfo] = field(default_factory=dict)
     abstract: bool = False
     has_explicit_pk: bool = False
+    is_builtin: bool = False   # injected from the contrib stub, not workspace
 
     @property
     def implicit_id(self) -> bool:
@@ -95,10 +97,23 @@ class DjangoIndex:
         return self.reverse_relations.get(model_qualname, {}).get(reverse_name)
 
     def lookup(self, simple_name: str) -> ModelInfo | None:
-        """Return a model by simple class name; None if ambiguous or absent."""
+        """Return a model by simple class name; None if ambiguous or absent.
+
+        When the workspace defines a model that shares its simple name with
+        a builtin (e.g. a project's own ``User`` next to
+        ``django.contrib.auth.models.User``), the workspace one wins. This
+        keeps the contrib stub from poisoning name resolution on projects
+        that swap out ``AUTH_USER_MODEL``.
+        """
         candidates = self.by_simple_name.get(simple_name) or []
         if len(candidates) == 1:
             return self.models[candidates[0]]
+        if len(candidates) > 1:
+            workspace = [
+                q for q in candidates if not self.models[q].is_builtin
+            ]
+            if len(workspace) == 1:
+                return self.models[workspace[0]]
         return None
 
     def summary(self) -> str:
@@ -197,12 +212,15 @@ def _resolve_base(base_str: str, imports: dict[str, str]) -> str:
     return base_str
 
 
-def _scrape_file(path: Path, module: str) -> _FileScrape | None:
-    try:
-        source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        _log.debug("skipping %s: %s", path, e)
-        return None
+def _scrape_file(
+    path: Path, module: str, *, source: str | None = None
+) -> _FileScrape | None:
+    if source is None:
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            _log.debug("skipping %s: %s", path, e)
+            return None
     try:
         tree = ast.parse(source, filename=str(path))
     except SyntaxError as e:
@@ -375,9 +393,14 @@ def _resolve_fk_target(
     *,
     self_qualname: str,
     file_imports: dict[str, str],
-    by_simple: dict[str, list[str]],
+    index: DjangoIndex,
 ) -> str | None:
-    """Best-effort resolution of a relation field's first positional arg."""
+    """Best-effort resolution of a relation field's first positional arg.
+
+    Uses :meth:`DjangoIndex.lookup` for simple-name matches so a
+    workspace model shadows a same-named builtin (the same rule that
+    governs receiver resolution at scan time).
+    """
     s = _string_value(arg)
     if s is not None:
         if s == "self":
@@ -388,19 +411,15 @@ def _resolve_fk_target(
             simple = s.rsplit(".", 1)[-1]
         else:
             simple = s
-        candidates = by_simple.get(simple) or []
-        if len(candidates) == 1:
-            return candidates[0]
-        return None
+        info = index.lookup(simple)
+        return info.qualname if info is not None else None
     # Bare Name — `User`, possibly imported.
     if isinstance(arg, ast.Name):
         local = arg.id
         if local in file_imports:
             return file_imports[local]
-        candidates = by_simple.get(local) or []
-        if len(candidates) == 1:
-            return candidates[0]
-        return None
+        info = index.lookup(local)
+        return info.qualname if info is not None else None
     # Attribute — `myapp.models.User`.
     flat = _flatten_attribute(arg)
     if flat is not None:
@@ -415,7 +434,7 @@ def _populate_fields(
     info: ModelInfo,
     class_node: ast.ClassDef,
     file_imports: dict[str, str],
-    by_simple: dict[str, list[str]],
+    index: DjangoIndex,
 ) -> None:
     for stmt in class_node.body:
         # Only top-level `name = Field(...)` style declarations.
@@ -445,7 +464,7 @@ def _populate_fields(
                 stmt.value.args[0],
                 self_qualname=info.qualname,
                 file_imports=file_imports,
-                by_simple=by_simple,
+                index=index,
             )
         info.fields[field_name] = fi
 
@@ -465,6 +484,40 @@ _DEFAULT_SKIP = frozenset({
     "__pycache__", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
     "build", "dist", "site-packages",
 })
+
+
+# Synthetic anchor for builtin-stub file paths. Nothing reads these paths
+# off disk; they exist so each builtin scrape has a unique, hashable key.
+_BUILTIN_ROOT = Path("/__iommi_lsp_builtins__")
+
+
+def _builtin_path(module: str) -> Path:
+    parts = module.split(".")
+    parts[-1] = parts[-1] + ".py"
+    return _BUILTIN_ROOT.joinpath(*parts)
+
+
+def _is_builtin_path(path: Path) -> bool:
+    try:
+        return path.is_relative_to(_BUILTIN_ROOT)
+    except ValueError:
+        return False
+
+
+def _build_builtin_scrapes() -> dict[Path, _FileScrape]:
+    """Parse each entry in :data:`BUILTIN_MODULES` into a scrape.
+
+    Cached at module level wouldn't help much (each scrape is ~µs) and
+    would complicate test isolation. Keep it simple: rebuild on each
+    ``assemble_index`` call.
+    """
+    out: dict[Path, _FileScrape] = {}
+    for module, source in BUILTIN_MODULES.items():
+        path = _builtin_path(module)
+        scrape = _scrape_file(path, module, source=source)
+        if scrape is not None:
+            out[path] = scrape
+    return out
 
 
 def _iter_python_files(root: Path) -> list[Path]:
@@ -502,14 +555,30 @@ def scrape_file(workspace_root: Path, file_path: Path) -> _FileScrape | None:
 
 
 def assemble_index(
-    workspace_root: Path, scrapes: dict[Path, _FileScrape]
+    workspace_root: Path,
+    scrapes: dict[Path, _FileScrape],
+    *,
+    include_builtins: bool = True,
 ) -> DjangoIndex:
     """Run classification, field extraction, and reverse-relation
-    computation over a precomputed scrape map. Pure CPU work."""
+    computation over a precomputed scrape map. Pure CPU work.
+
+    When *include_builtins* is true (the default), a static stub of
+    ``django.contrib.auth`` / ``contenttypes`` / ``sessions`` models is
+    folded in so projects that use Django's built-in ``User`` get ORM-
+    lookup validation without us having to import site-packages. A
+    workspace model with the same simple name as a builtin (e.g. a
+    project's own ``User``) still wins resolution.
+    """
     workspace_root = workspace_root.resolve()
+    all_scrapes: dict[Path, _FileScrape] = dict(scrapes)
+    if include_builtins:
+        for path, scrape in _build_builtin_scrapes().items():
+            all_scrapes.setdefault(path, scrape)
+
     raws: list[_RawClass] = []
     file_imports: dict[Path, dict[str, str]] = {}
-    for path, scrape in scrapes.items():
+    for path, scrape in all_scrapes.items():
         raws.extend(scrape.classes)
         file_imports[path] = scrape.imports
 
@@ -524,22 +593,39 @@ def assemble_index(
             name=raw.name,
             file_path=raw.file_path,
             bases=list(raw.resolved_bases),
+            is_builtin=_is_builtin_path(raw.file_path),
         )
         index.add_model(info)
 
     # Second pass: populate fields (now `index.by_simple_name` is full).
-    by_simple = index.by_simple_name
     for raw in model_raws.values():
         info = index.models[raw.qualname]
         _populate_fields(
             info,
             raw.node,
             file_imports.get(raw.file_path, {}),
-            by_simple,
+            index,
         )
 
-    # Third pass: build reverse_relations.
+    # Third pass: propagate inherited fields. Django's metaclass copies
+    # abstract-base fields into the concrete subclass; concrete-base
+    # fields are queryable on the subclass too (multi-table JOIN). We
+    # don't distinguish — for kwarg validation, "the subclass knows about
+    # this field" is what matters. Iterate to fixed point so chains
+    # (User -> AbstractUser -> AbstractBaseUser) resolve regardless of
+    # which order we walk.
+    _propagate_inherited_fields(model_raws, index)
+
+    # Fourth pass: build reverse_relations. Only concrete models register
+    # reverse accessors — abstract bases that declare e.g. an M2M with a
+    # related_name share the FieldInfo across every concrete subclass
+    # after propagation, and Django itself requires ``%(class)s`` in
+    # related_name when an abstract base owns a relation. Walking
+    # concrete models only means we record one reverse per concrete
+    # subclass, which matches runtime.
     for info in index.models.values():
+        if info.abstract:
+            continue
         for fi in info.fields.values():
             if fi.field_type not in RELATION_FIELD_NAMES:
                 continue
@@ -565,6 +651,48 @@ def assemble_index(
         sum(len(v) for v in index.reverse_relations.values()),
     )
     return index
+
+
+def _propagate_inherited_fields(
+    model_raws: dict[str, _RawClass], index: DjangoIndex
+) -> None:
+    """Copy fields from base ModelInfos into their subclasses.
+
+    Each model's resolved bases are walked; bases that match an entry in
+    *index.models* (by qualname or by simple-name with a unique
+    candidate) contribute their fields to the subclass. Iterates to
+    fixed point so multi-level chains converge regardless of walk
+    order. A field's ``is_pk`` carries through to ``has_explicit_pk`` on
+    the subclass.
+    """
+    changed = True
+    while changed:
+        changed = False
+        for raw in model_raws.values():
+            target = index.models[raw.qualname]
+            for base_str in raw.resolved_bases:
+                base_info = _resolve_base_to_model(base_str, index)
+                if base_info is None or base_info.qualname == target.qualname:
+                    continue
+                for fname, fi in base_info.fields.items():
+                    if fname in target.fields:
+                        continue
+                    target.fields[fname] = fi
+                    if fi.is_pk:
+                        target.has_explicit_pk = True
+                    changed = True
+
+
+def _resolve_base_to_model(
+    base_str: str, index: DjangoIndex
+) -> ModelInfo | None:
+    if base_str in index.models:
+        return index.models[base_str]
+    simple = base_str.rsplit(".", 1)[-1]
+    candidates = index.by_simple_name.get(simple) or []
+    if len(candidates) == 1:
+        return index.models[candidates[0]]
+    return None
 
 
 def build_index(workspace_root: Path) -> DjangoIndex:

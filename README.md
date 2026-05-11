@@ -139,6 +139,63 @@ Bias is explicitly toward false negatives — better to leak a bit of noise
 than to suppress a real bug. The index is rebuilt incrementally on
 `didChange`/`didSave` and never imports the user's code.
 
+## Unknown ORM field/lookup diagnostics
+
+On top of subtracting ty's false positives, the Django analyzer emits its
+own `django-unknown-orm-lookup` warnings when it spots a kwarg or string
+path that does not resolve against the workspace index. The intent is to
+catch typos that the type checker can't see — `User.objects.filter(eemail='x')`
+is a valid Python call, but a SQL error at runtime.
+
+Covered call shapes:
+
+* kwargs on `filter` / `exclude` / `get` / `get_or_create` /
+  `update_or_create` / `update` / `create`, including `__`-traversal
+  through relation fields and reverse relations;
+* string field paths in `order_by` / `values` / `values_list` / `only` /
+  `defer` / `distinct` / `select_related` / `prefetch_related`
+  (`order_by('-foo')` strips the leading `-`; `'?'` is recognised);
+* `Q(field=…)` / `models.Q(…)` reachable through `|` / `&` / `~`
+  composition, including nested `Q(Q(…), …)`;
+* `F('field__path')` anywhere in the call's args or kwargs.
+
+Receivers we recognise (anything else is silent):
+
+* `Model.objects.…` and friends (`_default_manager`, `_base_manager`);
+* `pkg.Model.objects.…` / `myapp.models.Model.objects.…` — the rightmost
+  attribute segment is matched against the index by simple name, so it
+  inherits the index's natural ambiguity protection (two models with the
+  same simple name → silent);
+* local variables previously assigned from any of the above within the
+  same function (or at module scope), including chained reassignments
+  like `qs = User.objects.all(); qs = qs.filter(...); qs.filter(...)`.
+
+Bias is the same as the subtractive filter — when the receiver is
+unknown, ambiguous, or comes from a parameter / queryset method we don't
+model, we say nothing rather than risk a false positive. Disable
+entirely with:
+
+```toml
+[tool.iommi-lsp]
+disabled_rules = ["orm_lookup"]
+```
+
+### Built-in models and inheritance
+
+The index bundles a static stub of the Django contrib models so projects
+that import `django.contrib.auth.models.User`, `Group`, `Permission`,
+`django.contrib.contenttypes.models.ContentType`, or
+`django.contrib.sessions.models.Session` get validation without us
+having to import site-packages. A workspace model with the same simple
+name (e.g. a custom `User` via `AUTH_USER_MODEL`) shadows the builtin
+during name resolution.
+
+Abstract-base fields propagate to concrete subclasses. So
+`class User(AbstractUser): ...` correctly resolves `email` /
+`username` / etc., and your own `class Timestamped(models.Model):
+class Meta: abstract = True` lets a `Book(Timestamped)` filter on
+`created` without a false positive.
+
 ## Per-project configuration
 
 Add a `[tool.iommi-lsp]` table to your `pyproject.toml`:
@@ -153,8 +210,8 @@ manager = ["mongo", "search"]            # treat these as Manager-like attrs
 ```
 
 Recognised rule groups: `manager`, `meta`, `pk`, `exception`, `fk_id`,
-`reverse`. Unknown groups in `disabled_rules` are ignored with a stderr
-warning rather than silently breaking the filter.
+`reverse`, `orm_lookup`. Unknown groups in `disabled_rules` are ignored
+with a stderr warning rather than silently breaking the filter.
 
 A missing or malformed `pyproject.toml` falls back to defaults; the
 proxy never crashes on a bad config.

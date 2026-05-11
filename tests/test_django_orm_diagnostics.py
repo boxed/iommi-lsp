@@ -132,6 +132,35 @@ def test_reverse_relation_traversal(analyzer_blog: DjangoAnalyzer, tmp_path: Pat
     assert analyzer_blog.additional_diagnostics(uri) == []
 
 
+def test_m2m_in_lookup(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
+    # `tags` is the reverse m2m on Article (from Tag.articles related_name).
+    # `.filter(tags__in=[...])` is valid Django — filters by Tag PK.
+    src = (
+        "from blog.models import Article\n"
+        "Article.objects.filter(tags__in=[1, 2]).first()\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_fk_in_lookup(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from blog.models import Article\n"
+        "Article.objects.filter(author__in=[1, 2]).first()\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
+def test_fk_isnull_lookup(analyzer_blog: DjangoAnalyzer, tmp_path: Path):
+    src = (
+        "from blog.models import Article\n"
+        "Article.objects.filter(author__isnull=True).first()\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_blog.additional_diagnostics(uri) == []
+
+
 def test_chained_filter_exclude(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
     src = (
         "from myapp.models import User\n"
@@ -479,6 +508,227 @@ def test_text_provider_used_when_file_absent_on_disk(
     diags = analyzer_basic.additional_diagnostics(uri)
     assert len(diags) == 1
     assert "asasdd" in diags[0]["message"]
+
+
+def test_local_queryset_variable_unknown_field(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "from myapp.models import User\n"
+        "def f():\n"
+        "    qs = User.objects.all()\n"
+        "    qs.filter(bogus='x')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+    assert diags[0]["data"]["on_model"] == "myapp.models.User"
+
+
+def test_local_queryset_chained_through_filter(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "from myapp.models import User\n"
+        "def f():\n"
+        "    qs = User.objects.filter(email='x')\n"
+        "    qs2 = qs.exclude(username='y')\n"
+        "    qs2.filter(bogus='z')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    msgs = [d["message"] for d in diags]
+    # The intermediate filter/exclude kwargs are valid; only `bogus` is flagged.
+    assert len(diags) == 1, msgs
+    assert "bogus" in diags[0]["message"]
+
+
+def test_local_queryset_reassigned_keeps_model(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "from myapp.models import User\n"
+        "def f():\n"
+        "    qs = User.objects.all()\n"
+        "    qs = qs.filter(email='a')\n"
+        "    qs.filter(bogus='b')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_local_queryset_self_referential_does_not_loop(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    # Only assignment for `qs` references itself — we can't resolve a
+    # model, so we say nothing (no infinite recursion either).
+    src = (
+        "def f(qs):\n"
+        "    qs = qs.filter(literally_anything=1)\n"
+        "    qs.filter(also_anything=2)\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.additional_diagnostics(uri) == []
+
+
+def test_module_attribute_receiver(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "from myapp import models as m\n"
+        "m.User.objects.filter(bogus='x')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+    assert diags[0]["data"]["on_model"] == "myapp.models.User"
+
+
+def test_fully_qualified_module_path_receiver(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    src = (
+        "import myapp.models\n"
+        "myapp.models.User.objects.filter(bogus='x')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_local_at_module_scope(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path
+):
+    # No enclosing function — assignment lives at module level.
+    src = (
+        "from myapp.models import User\n"
+        "qs = User.objects.all()\n"
+        "qs.filter(bogus='x')\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
+
+
+def test_builtin_user_known_field_accepted(tmp_path: Path):
+    # A workspace that doesn't define its own User should still get
+    # ORM-lookup validation for django.contrib.auth.User via the stub.
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Review(models.Model):\n"
+        "    text = models.TextField()\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src_path = tmp_path / "u.py"
+    src_path.write_text(
+        "from django.contrib.auth.models import User\n"
+        "User.objects.filter(email='ok')\n"
+    )
+    assert a.additional_diagnostics(src_path.as_uri()) == []
+
+
+def test_builtin_user_unknown_field_flagged(tmp_path: Path):
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Review(models.Model):\n"
+        "    text = models.TextField()\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src_path = tmp_path / "u.py"
+    src_path.write_text(
+        "from django.contrib.auth.models import User\n"
+        "User.objects.filter(emai='typo')\n"
+    )
+    diags = a.additional_diagnostics(src_path.as_uri())
+    assert len(diags) == 1
+    assert "emai" in diags[0]["message"]
+    assert diags[0]["data"]["on_model"] == "django.contrib.auth.models.User"
+
+
+def test_builtin_user_unknown_lookup_flagged(tmp_path: Path):
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src_path = tmp_path / "u.py"
+    src_path.write_text(
+        "from django.contrib.auth.models import User\n"
+        "User.objects.filter(email__fo='nope')\n"
+    )
+    diags = a.additional_diagnostics(src_path.as_uri())
+    assert len(diags) == 1
+    assert diags[0]["data"]["outcome"] == "unknown_lookup"
+    assert "fo" in diags[0]["message"]
+
+
+def test_custom_user_extending_abstract_user(tmp_path: Path):
+    # `class User(AbstractUser)` in the workspace — propagation pulls in
+    # email/username from the stubbed AbstractUser, plus the local
+    # `extra` field. A typo on a non-existent field is still flagged.
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "models.py").write_text(
+        "from django.contrib.auth.models import AbstractUser\n"
+        "from django.db import models\n"
+        "class User(AbstractUser):\n"
+        "    extra = models.CharField(max_length=10)\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src_path = tmp_path / "u.py"
+    src_path.write_text(
+        "from app.models import User\n"
+        "User.objects.filter(email='ok')\n"
+        "User.objects.filter(extra='ok')\n"
+        "User.objects.filter(emai='typo')\n"
+    )
+    diags = a.additional_diagnostics(src_path.as_uri())
+    assert len(diags) == 1
+    assert "emai" in diags[0]["message"]
+    assert diags[0]["data"]["on_model"] == "app.models.User"
+
+
+def test_abstract_base_field_propagation(
+    tmp_path: Path,
+):
+    # Subclass of a project-local abstract base inherits its fields.
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "__init__.py").write_text("")
+    (tmp_path / "lib" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Timestamped(models.Model):\n"
+        "    created = models.DateTimeField()\n"
+        "    class Meta:\n"
+        "        abstract = True\n"
+        "class Book(Timestamped):\n"
+        "    title = models.CharField(max_length=200)\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src_path = tmp_path / "u.py"
+    src_path.write_text(
+        "from lib.models import Book\n"
+        "Book.objects.filter(created='x', title='y')\n"
+        "Book.objects.filter(bogus='z')\n"
+    )
+    diags = a.additional_diagnostics(src_path.as_uri())
+    assert len(diags) == 1
+    assert "bogus" in diags[0]["message"]
 
 
 def test_disabled_via_config(analyzer_basic: DjangoAnalyzer, tmp_path: Path):

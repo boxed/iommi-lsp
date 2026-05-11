@@ -72,6 +72,9 @@ def _walk_from(
         # Reverse relation?
         source = index.reverse_source(model.qualname, seg)
         if source is not None:
+            # Reverse-relation + lookup (`tags__in=[…]`) acts as a leaf.
+            if i + 1 < len(chain) and chain[i + 1] in ORM_LOOKUP_NAMES:
+                return _step_after_leaf(model, chain, i + 1)
             target = index.models.get(source)
             if target is None:
                 return OK
@@ -89,6 +92,11 @@ def _walk_from(
         if i + 1 >= len(chain):
             # Terminal — `.filter(author=user)` is fine.
             return OK
+        # `.filter(tags__in=[…])`, `.filter(author__isnull=True)` —
+        # a relation followed by a lookup name acts as a leaf, with
+        # Django filtering by PK/instance.
+        if chain[i + 1] in ORM_LOOKUP_NAMES:
+            return _step_after_leaf(model, chain, i + 1)
         target_qualname = fi.target
         if target_qualname is None or target_qualname not in index.models:
             return OK   # unknown target → bias toward OK
