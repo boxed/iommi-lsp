@@ -7,9 +7,9 @@ and adds the Django- and iommi-awareness ty can't have on its own.
 
 ### Django
 
-* **Real autocomplete for ORM kwargs.** Inside `User.objects.filter(|`,
-  `.exclude(|`, `.get(|`, `.update(|`, `.create(|`, `.get_or_create(|`,
-  `.update_or_create(|` you get the model's queryable names — declared
+* **Real autocomplete for ORM kwargs.** Inside `User.objects.filter(‸`,
+  `.exclude(‸`, `.get(‸`, `.update(‸`, `.create(‸`, `.get_or_create(‸`,
+  `.update_or_create(‸` (where `‸` is the cursor) you get the model's queryable names — declared
   fields, FK `_id` accessors, `pk`, reverse-relation accessors —
   with `__`-traversal into related models. Suggestions insert as
   `name=` so the caret lands at the value. At a recognised call site
@@ -36,17 +36,17 @@ and adds the Django- and iommi-awareness ty can't have on its own.
 ### iommi
 
 * **Refinable autocomplete inside `Class(kw__chain=...)` calls.**
-  `Table(c|` suggests `columns__`, `cell__`, `query__`, …;
+  `Table(c‸` (where `‸` is the cursor) suggests `columns__`, `cell__`, `query__`, …;
   containers get a trailing `__` and scalars get `=`. Chains walk
-  the iommi refinable graph, so `Table(columns__name__|` offers
+  the iommi refinable graph, so `Table(columns__name__‸` offers
   the configurable surface of `Column`.
 * **`auto__` namespace.** Always surfaces `model` / `rows` /
   `instance` / `include` / `exclude` whether or not the graph
   reflects it, since iommi's default `Namespace()` is empty.
-* **Django field bridging.** `Table(auto__model=User, columns__|)`
+* **Django field bridging.** `Table(auto__model=User, columns__‸)`
   suggests `User`'s fields (insert as `username__`, `email__`, …
   so you can keep configuring the auto-generated column). The same
-  works inside `auto__include=['|']` / `auto__exclude=['|']` string
+  works inside `auto__include=['‸']` / `auto__exclude=['‸']` string
   literals.
 * **`iommi-unknown-refinable` diagnostics.** Invalid chains in
   `Class(kw__chain=...)` calls flag the first dead-end segment.
@@ -195,7 +195,7 @@ At a recognised iommi-call kwarg position the LSP claims **exclusivity**:
 ty's free-form variable suggestions are dropped so you only see real
 refinables. Three flavours of completion fire from the same position:
 
-* **Refinable names** — `Table(c|` suggests `columns__`, `cell__`,
+* **Refinable names** — `Table(c‸` suggests `columns__`, `cell__`,
   `query__`, … with container refinables getting a trailing `__` and
   scalars getting `=`.
 * **`auto__` namespace** — synthesised as a known namespace with
@@ -205,7 +205,7 @@ refinables. Three flavours of completion fire from the same position:
   `auto__exclude=[...]` string literals, and after `columns__` /
   `fields__` / `filters__` / `parts__` when the call carries
   `auto__model=Model` (or `auto__rows=Model.objects.…`). This is the
-  bridge that turns `Table(auto__model=User, columns__|)` into a
+  bridge that turns `Table(auto__model=User, columns__‸)` into a
   member-name list drawn from the `User` model's fields.
 
 Synthesised stubs cover `Table`, `Form`, `Query`, and `Page` so the
@@ -283,14 +283,14 @@ caret lands inside the value position.
 Triggered by `(` and `,` (and continuous-completion mode in most
 editors). The receiver-resolution rules match the diagnostic path —
 direct `Model.objects.…`, module-qualified `pkg.Model.objects.…`, and
-local queryset variables (`qs = User.objects.all(); qs.filter(em|)`).
+local queryset variables (`qs = User.objects.all(); qs.filter(em‸)`).
 
 At a recognised position we claim **exclusivity**: ty's items are
 dropped from the response so the user doesn't see noise like `em`
 matching any random local variable next to our `email=`. Empty +
 exclusive is intentional — if the partial matches no field, the
 editor shows nothing rather than back-filling with ty's free-form
-name list. When the receiver doesn't resolve (`qs.filter(em|` where
+name list. When the receiver doesn't resolve (`qs.filter(em‸` where
 we can't tell what `qs` is) we step back and let ty handle it. If
 ty errored on the completion request we substitute our own response;
 if ty responded normally we either replace (exclusive) or merge

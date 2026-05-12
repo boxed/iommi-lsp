@@ -129,7 +129,9 @@ async def test_exclusive_response_replaces_ty_items():
     decoded = json.loads(await m.on_response(resp))
     labels = [it["label"] for it in decoded["result"]["items"]]
     assert labels == ["email"]
-    assert decoded["result"]["isIncomplete"] is False
+    # isIncomplete is True so the editor re-requests on the next
+    # keystroke and we get a chance to re-apply our prefix-priority sort.
+    assert decoded["result"]["isIncomplete"] is True
 
 
 @pytest.mark.asyncio
@@ -291,8 +293,11 @@ async def test_prefix_match_gets_higher_sort_priority_than_substring():
 
 
 @pytest.mark.asyncio
-async def test_sort_text_skipped_when_partial_is_empty():
-    # No identifier under the cursor — no useful prefix to prioritise by.
+async def test_partial_empty_no_sort_but_forces_is_incomplete():
+    # No identifier under the cursor — no useful prefix to prioritise by,
+    # so no sortText. But we still force ``isIncomplete: true`` so the
+    # editor re-requests when the user types the next char (otherwise it
+    # would filter the cached list using its own scoring algorithm).
     m = CompletionMatchmaker(
         analyzers=[_Completer([])], text_provider=lambda uri: "    ",
     )
@@ -307,8 +312,28 @@ async def test_sort_text_skipped_when_partial_is_empty():
         "jsonrpc": "2.0", "id": 22,
         "result": {"items": [{"label": "foo"}, {"label": "bar"}]},
     })
+    decoded = json.loads(await m.on_response(resp))
+    assert decoded["result"]["isIncomplete"] is True
+    assert [it["label"] for it in decoded["result"]["items"]] == ["foo", "bar"]
+    assert all("sortText" not in it for it in decoded["result"]["items"])
+
+
+@pytest.mark.asyncio
+async def test_passthrough_when_no_text_provider_and_no_analyzer_interest():
+    # No text_provider and no analyzer items → zero-copy passthrough.
+    m = CompletionMatchmaker(analyzers=[_Completer([])])
+    await m.on_request(_frame({
+        "jsonrpc": "2.0", "id": 33, "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": "file:///x.py"},
+            "position": {"line": 0, "character": 0},
+        },
+    }))
+    resp = _frame({
+        "jsonrpc": "2.0", "id": 33,
+        "result": {"items": [{"label": "foo"}]},
+    })
     out = await m.on_response(resp)
-    # No analyzer items, no partial — full passthrough.
     assert out is resp
 
 

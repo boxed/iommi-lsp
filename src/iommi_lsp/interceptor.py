@@ -200,14 +200,18 @@ def _items_of_result(result: Any) -> list | None:
 def _annotate_sort_text(items: list, partial: str) -> None:
     """Rank items whose match-text starts with *partial* ahead of the rest.
 
-    Sets ``sortText`` on each item so the client surfaces prefix matches
-    first — e.g. typing ``fi`` at ``User.objects.fi`` puts ``filter`` /
-    ``first`` above ``afirst`` / ``complex_filter``. Within each priority
-    bucket we preserve whatever order the producer (ty or an analyzer)
-    intended by suffixing the item's existing ``sortText`` (or, failing
-    that, its label). Case-insensitive: editors fold case for prefix
-    matching by default and our own kwarg labels are all lowercase
-    anyway.
+    Sets ``sortText`` on each item AND reorders the list in place so the
+    client surfaces prefix matches first — e.g. typing ``fi`` at
+    ``User.objects.fi`` puts ``filter`` / ``first`` above ``afirst`` /
+    ``complex_filter``. Some LSP clients (TUI plugins, older protocols)
+    ignore ``sortText`` and just display server-side order; others do
+    their own fuzzy scoring and use ``sortText`` only as a tiebreaker.
+    Doing both — reorder the array AND set sortText — wins in all
+    cases. Within each priority bucket we preserve whatever order the
+    producer (ty or an analyzer) intended by suffixing the item's
+    existing ``sortText`` (or, failing that, its label). Case-insensitive:
+    editors fold case for prefix matching by default and our own kwarg
+    labels are all lowercase anyway.
     """
     if not partial:
         return
@@ -222,6 +226,13 @@ def _annotate_sort_text(items: list, partial: str) -> None:
         base = existing if isinstance(existing, str) else match_text
         priority = "0" if match_text.lower().startswith(partial_lc) else "1"
         item["sortText"] = f"{priority}_{base}"
+
+    def _key(it):
+        if not isinstance(it, dict):
+            return "2_"
+        st = it.get("sortText")
+        return st if isinstance(st, str) else "2_"
+    items.sort(key=_key)
 
 
 def _ensure_completion_capability(payload: dict, original_body: bytes) -> bytes:
@@ -329,8 +340,13 @@ class CompletionMatchmaker:
 
         # Decide what kind of mutation (if any) we need to make.
         merged = bool(extras) or exclusive
-        will_sort = bool(partial)
-        if not merged and not will_sort:
+        # When we know the buffer text, we always want to repack so we can
+        # force ``isIncomplete: true`` — that prevents the editor from
+        # serving a stale cached completion list with its own scoring
+        # while the user keeps typing (which is what keeps ``afirst`` at
+        # the top once you've reached ``User.objects.fi``).
+        will_repack = self._text_provider is not None
+        if not merged and not will_repack:
             return body   # zero-copy: nothing for us to do here
 
         original_result = payload.get("result")
@@ -344,15 +360,14 @@ class CompletionMatchmaker:
                 # Nothing to substitute with — leave the error alone.
                 return body
             payload.pop("error", None)
-            payload["result"] = {"isIncomplete": False, "items": list(extras)}
+            payload["result"] = {"isIncomplete": True, "items": list(extras)}
         elif exclusive:
             # Drop whatever ty produced — at an ORM-kwarg position its
-            # free-form variable completions are noise. ``isIncomplete``
-            # is False so the editor stops asking for more.
-            payload["result"] = {"isIncomplete": False, "items": list(extras)}
+            # free-form variable completions are noise.
+            payload["result"] = {"isIncomplete": True, "items": list(extras)}
         elif extras:
             if original_result is None:
-                payload["result"] = {"isIncomplete": False, "items": list(extras)}
+                payload["result"] = {"isIncomplete": True, "items": list(extras)}
             elif isinstance(original_result, list):
                 payload["result"] = original_result + list(extras)
             elif isinstance(original_result, dict):
@@ -363,10 +378,15 @@ class CompletionMatchmaker:
             else:
                 return body   # unexpected shape; don't touch
 
-        if will_sort:
+        if will_repack:
             items = _items_of_result(payload.get("result"))
             if items is not None:
                 _annotate_sort_text(items, partial)
+            result = payload.get("result")
+            if isinstance(result, dict):
+                # Force re-request on each keystroke so our prefix
+                # priority gets recomputed against the latest partial.
+                result["isIncomplete"] = True
 
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
