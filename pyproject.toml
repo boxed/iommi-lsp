@@ -12,17 +12,14 @@ license = { text = "BSD-3-Clause" }
 authors = [{ name = "Anders Hovmöller" }]
 dependencies = [
     "lsprotocol>=2024.0.0,<2026.0.0",
-]
-
-[project.optional-dependencies]
-ty = [
     # Pinned narrow range — ty is pre-1.0 and diagnostic codes/text move.
     "ty>=0.0.34,<0.1.0",
 ]
+
+[project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    "ty>=0.0.34,<0.1.0",
 ]
 
 [project.scripts]

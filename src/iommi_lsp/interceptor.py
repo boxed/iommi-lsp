@@ -180,6 +180,50 @@ class DiagnosticInterceptor:
         return out
 
 
+def _items_of_result(result: Any) -> list | None:
+    """Return the mutable item list inside a completion *result*, or None.
+
+    LSP allows either a bare ``list`` of ``CompletionItem`` or a
+    ``CompletionList`` (``{"isIncomplete": …, "items": [...]}``). Returns
+    the underlying list (mutating it mutates the payload), or None for
+    anything we don't recognise.
+    """
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        items = result.get("items")
+        if isinstance(items, list):
+            return items
+    return None
+
+
+def _annotate_sort_text(items: list, partial: str) -> None:
+    """Rank items whose match-text starts with *partial* ahead of the rest.
+
+    Sets ``sortText`` on each item so the client surfaces prefix matches
+    first — e.g. typing ``fi`` at ``User.objects.fi`` puts ``filter`` /
+    ``first`` above ``afirst`` / ``complex_filter``. Within each priority
+    bucket we preserve whatever order the producer (ty or an analyzer)
+    intended by suffixing the item's existing ``sortText`` (or, failing
+    that, its label). Case-insensitive: editors fold case for prefix
+    matching by default and our own kwarg labels are all lowercase
+    anyway.
+    """
+    if not partial:
+        return
+    partial_lc = partial.lower()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        match_text = item.get("filterText") or item.get("label") or ""
+        if not isinstance(match_text, str):
+            continue
+        existing = item.get("sortText")
+        base = existing if isinstance(existing, str) else match_text
+        priority = "0" if match_text.lower().startswith(partial_lc) else "1"
+        item["sortText"] = f"{priority}_{base}"
+
+
 def _ensure_completion_capability(payload: dict, original_body: bytes) -> bytes:
     """Patch an ``initialize`` response so the editor knows we offer
     completions. If ty already advertises ``completionProvider`` we
@@ -215,10 +259,21 @@ class CompletionMatchmaker:
     ``CompletionList`` response shapes). Unmatched responses pass
     through untouched, so this is zero-cost when no analyzer is
     interested.
+
+    When a ``text_provider`` is supplied, we also annotate every item in
+    the merged response with a ``sortText`` that ranks prefix-of-cursor
+    matches above non-prefix matches — so typing ``fi`` at
+    ``User.objects.fi`` surfaces ``filter`` / ``first`` ahead of
+    ``afirst`` / ``complex_filter``.
     """
 
-    def __init__(self, analyzers: Sequence[Analyzer] = ()) -> None:
+    def __init__(
+        self,
+        analyzers: Sequence[Analyzer] = (),
+        text_provider: Callable[[str], str | None] | None = None,
+    ) -> None:
         self.analyzers: list[Analyzer] = list(analyzers)
+        self._text_provider = text_provider
         self._pending: dict[Any, tuple[str, dict]] = {}
         self._pending_initialize: set[Any] = set()
 
@@ -270,40 +325,63 @@ class CompletionMatchmaker:
             return body
         uri, position = context
         extras, exclusive = self._gather(uri, position)
-        if not extras and not exclusive:
-            return body
+        partial = self._partial_at(uri, position)
+
+        # Decide what kind of mutation (if any) we need to make.
+        merged = bool(extras) or exclusive
+        will_sort = bool(partial)
+        if not merged and not will_sort:
+            return body   # zero-copy: nothing for us to do here
+
+        original_result = payload.get("result")
 
         # If ty errored on completion (e.g. it doesn't implement the
         # method), swap the error for a success containing our items —
         # otherwise the editor would surface ty's error and discard the
         # whole response.
         if "error" in payload and "result" not in payload:
+            if not extras:
+                # Nothing to substitute with — leave the error alone.
+                return body
             payload.pop("error", None)
-            payload["result"] = {
-                "isIncomplete": False,
-                "items": list(extras),
-            }
-            return json.dumps(payload, separators=(",", ":")).encode("utf-8")
-
-        result = payload.get("result")
-        if exclusive:
+            payload["result"] = {"isIncomplete": False, "items": list(extras)}
+        elif exclusive:
             # Drop whatever ty produced — at an ORM-kwarg position its
             # free-form variable completions are noise. ``isIncomplete``
             # is False so the editor stops asking for more.
             payload["result"] = {"isIncomplete": False, "items": list(extras)}
-        elif result is None:
-            payload["result"] = {"isIncomplete": False, "items": list(extras)}
-        elif isinstance(result, list):
-            payload["result"] = result + list(extras)
-        elif isinstance(result, dict):
-            existing = list(result.get("items") or [])
-            existing.extend(extras)
-            result["items"] = existing
-            payload["result"] = result
-        else:
-            return body   # unexpected shape; don't touch
+        elif extras:
+            if original_result is None:
+                payload["result"] = {"isIncomplete": False, "items": list(extras)}
+            elif isinstance(original_result, list):
+                payload["result"] = original_result + list(extras)
+            elif isinstance(original_result, dict):
+                existing = list(original_result.get("items") or [])
+                existing.extend(extras)
+                original_result["items"] = existing
+                payload["result"] = original_result
+            else:
+                return body   # unexpected shape; don't touch
+
+        if will_sort:
+            items = _items_of_result(payload.get("result"))
+            if items is not None:
+                _annotate_sort_text(items, partial)
 
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _partial_at(self, uri: str, position: dict) -> str:
+        if self._text_provider is None:
+            return ""
+        text = self._text_provider(uri)
+        if not isinstance(text, str):
+            return ""
+        offset = _offset_from_lsp_position(text, position)
+        end = min(offset, len(text))
+        start = end
+        while start > 0 and (text[start - 1].isalnum() or text[start - 1] == "_"):
+            start -= 1
+        return text[start:end]
 
     def _gather(self, uri: str, position: dict) -> tuple[list[dict], bool]:
         """Collect items + exclusivity across analyzers.

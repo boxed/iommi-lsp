@@ -71,14 +71,15 @@ contract test suite (`tests/test_contract_real_ty.py`).
 uv tool install iommi-lsp     # or: pipx install iommi-lsp
 ```
 
-`ty` must be available on `PATH` (`uv tool install ty` works), or pass
-`--ty-command "uvx ty server"` to use a one-shot uv invocation.
+`ty` is a hard dependency and is installed alongside `iommi-lsp` into
+the same environment, so the default just works — no editor-side
+`--ty-command` plumbing required.
 
 ## Run
 
 ```sh
-iommi-lsp                                    # spawns `ty server` from PATH
-iommi-lsp --ty-command "uvx ty server"       # uvx fallback
+iommi-lsp                                    # spawns the bundled `ty server`
+iommi-lsp --ty-command "uvx ty server"       # override (e.g. pin a different ty)
 iommi-lsp --workspace ./myproject            # eager indexing for debugging
 iommi-lsp index ./myproject                  # dump the Django model index and exit
 iommi-lsp graph build ./myproject            # reflect installed iommi -> .iommi-lsp-graph.json

@@ -2,8 +2,9 @@
 
 Two modes:
 
-* No subcommand (default) — run as the LSP proxy on stdio. Spawns
-  ``ty server`` from ``PATH`` unless ``--ty-command`` overrides.
+* No subcommand (default) — run as the LSP proxy on stdio. Spawns the
+  bundled ``ty server`` (auto-detected next to our own interpreter)
+  unless ``--ty-command`` overrides.
 * ``iommi-lsp index <path>`` — build the Django model index for *path*
   and dump it to stdout. A debugging tool for milestone 3.
 """
@@ -14,6 +15,7 @@ import argparse
 import asyncio
 import os
 import shlex
+import shutil
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -40,8 +42,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--ty-command",
-        default="ty server",
-        help="Command to spawn the backend type checker (default: %(default)r).",
+        default=None,
+        help="Command to spawn the backend type checker. Defaults to the "
+             "bundled `ty server` next to this interpreter, falling back to "
+             "`ty server` on PATH.",
     )
     p.add_argument(
         "--workspace",
@@ -98,8 +102,28 @@ def _build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
-    ty_command = shlex.split(ty_command_str)
+def _resolve_ty_binary() -> str:
+    """Locate the ``ty`` executable to spawn.
+
+    Prefer the one shipped next to our own interpreter — when iommi-lsp
+    is installed as a uv tool / pipx app, ``ty`` lives in the same
+    ``bin/`` directory as ``sys.executable`` because we declare it as a
+    hard dependency. Fall back to ``PATH``, then to the bare name (lets
+    subprocess fail with a clear ENOENT if nothing's installed).
+    """
+    sibling_dir = str(Path(sys.executable).parent)
+    return (
+        shutil.which("ty", path=sibling_dir)
+        or shutil.which("ty")
+        or "ty"
+    )
+
+
+def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
+    if ty_command_str is None:
+        ty_command = [_resolve_ty_binary(), "server"]
+    else:
+        ty_command = shlex.split(ty_command_str)
     if not ty_command:
         print("error: --ty-command must not be empty", file=sys.stderr)
         return 2
@@ -119,7 +143,9 @@ def _run_proxy(ty_command_str: str, workspace: Path | None) -> int:
     analyzers = [django_analyzer, iommi_analyzer]
 
     interceptor = DiagnosticInterceptor(analyzers=analyzers)
-    matchmaker = CompletionMatchmaker(analyzers=analyzers)
+    matchmaker = CompletionMatchmaker(
+        analyzers=analyzers, text_provider=documents.get,
+    )
 
     async def workspace_seen(root: Path) -> None:
         for a in analyzers:

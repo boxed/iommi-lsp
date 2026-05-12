@@ -258,6 +258,110 @@ async def test_initialize_response_keeps_existing_completion_provider():
 
 
 @pytest.mark.asyncio
+async def test_prefix_match_gets_higher_sort_priority_than_substring():
+    # Cursor sits after `User.objects.fi` on line 0. With a text_provider
+    # the matchmaker tags each completion item with a sortText that
+    # ranks `filter`/`first` above `afirst`/`complex_filter`.
+    source = "User.objects.fi"
+    m = CompletionMatchmaker(
+        analyzers=[_Completer([])], text_provider=lambda uri: source,
+    )
+    await m.on_request(_frame({
+        "jsonrpc": "2.0", "id": 21, "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": "file:///x.py"},
+            "position": {"line": 0, "character": len(source)},
+        },
+    }))
+    resp = _frame({
+        "jsonrpc": "2.0", "id": 21,
+        "result": {"items": [
+            {"label": "afirst"},
+            {"label": "complex_filter"},
+            {"label": "filter"},
+            {"label": "first"},
+        ]},
+    })
+    decoded = json.loads(await m.on_response(resp))
+    sorted_items = sorted(decoded["result"]["items"], key=lambda it: it["sortText"])
+    assert [it["label"] for it in sorted_items] == [
+        "filter", "first",         # prefix matches first, alphabetical inside
+        "afirst", "complex_filter",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sort_text_skipped_when_partial_is_empty():
+    # No identifier under the cursor — no useful prefix to prioritise by.
+    m = CompletionMatchmaker(
+        analyzers=[_Completer([])], text_provider=lambda uri: "    ",
+    )
+    await m.on_request(_frame({
+        "jsonrpc": "2.0", "id": 22, "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": "file:///x.py"},
+            "position": {"line": 0, "character": 0},
+        },
+    }))
+    resp = _frame({
+        "jsonrpc": "2.0", "id": 22,
+        "result": {"items": [{"label": "foo"}, {"label": "bar"}]},
+    })
+    out = await m.on_response(resp)
+    # No analyzer items, no partial — full passthrough.
+    assert out is resp
+
+
+@pytest.mark.asyncio
+async def test_sort_text_preserves_existing_sort_text_as_secondary_key():
+    source = "fi"
+    m = CompletionMatchmaker(
+        analyzers=[_Completer([])], text_provider=lambda uri: source,
+    )
+    await m.on_request(_frame({
+        "jsonrpc": "2.0", "id": 23, "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": "file:///x.py"},
+            "position": {"line": 0, "character": 2},
+        },
+    }))
+    resp = _frame({
+        "jsonrpc": "2.0", "id": 23,
+        "result": {"items": [
+            {"label": "filter", "sortText": "aaa"},
+            {"label": "afirst", "sortText": "bbb"},
+        ]},
+    })
+    decoded = json.loads(await m.on_response(resp))
+    items = {it["label"]: it["sortText"] for it in decoded["result"]["items"]}
+    assert items["filter"].startswith("0_") and items["filter"].endswith("aaa")
+    assert items["afirst"].startswith("1_") and items["afirst"].endswith("bbb")
+
+
+@pytest.mark.asyncio
+async def test_sort_text_also_applied_to_analyzer_items_merged_in():
+    source = "fi"
+    m = CompletionMatchmaker(
+        analyzers=[_Completer([{"label": "filter"}, {"label": "name"}])],
+        text_provider=lambda uri: source,
+    )
+    await m.on_request(_frame({
+        "jsonrpc": "2.0", "id": 24, "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": "file:///x.py"},
+            "position": {"line": 0, "character": 2},
+        },
+    }))
+    resp = _frame({
+        "jsonrpc": "2.0", "id": 24, "result": {"items": []},
+    })
+    decoded = json.loads(await m.on_response(resp))
+    sort = {it["label"]: it["sortText"] for it in decoded["result"]["items"]}
+    assert sort["filter"].startswith("0_")
+    assert sort["name"].startswith("1_")
+
+
+@pytest.mark.asyncio
 async def test_analyzer_without_completions_method_is_fine():
     class Slim(Analyzer):
         name = "slim"
