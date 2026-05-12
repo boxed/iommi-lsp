@@ -201,23 +201,6 @@ breaking the filter.
 A missing or malformed `pyproject.toml` falls back to defaults; the
 proxy never crashes on a bad config.
 
-## Caveats
-
-* **Pre-1.0 ty.** Diagnostic codes and message text *will* change. The
-  contract suite (`tests/test_contract_real_ty.py`) catches breakage when
-  you bump ty.
-* **iommi graph requires iommi to be importable somewhere.** Either in
-  the same venv as `iommi_lsp`, or in the workspace's `.venv` / `venv`.
-  Without that, the synthesised stubs cover the public iommi classes
-  but project-specific subclasses (and their refinables) stay invisible
-  until you run `iommi_lsp graph build`.
-* **No type-checker arbitrage.** This proxies one backend at a time; you
-  still pick `ty` (or eventually `mypy` / `pyright` once those backends
-  are wired in).
-* **Astral may absorb this.** If/when `ty` ships first-class library
-  support, the Django filter becomes mostly redundant. The proxy and the
-  iommi layer remain useful.
-
 ## Development
 
 ```sh
