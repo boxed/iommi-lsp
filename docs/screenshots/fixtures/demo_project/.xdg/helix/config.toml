@@ -1,0 +1,23 @@
+# Loaded via `hx --config $PWD/.xdg/helix/config.toml` in the screenshot
+# tapes. Helix 25.07 ignores .helix/config.toml and XDG_CONFIG_HOME, so
+# --config with an absolute path is the only way to get this loaded.
+
+# Match Helix's theme to the terminal theme set in every tape — without
+# this, Helix uses its built-in default whose diagnostic-highlight color
+# clashes with the Catppuccin background.
+theme = "catppuccin_mocha"
+
+[editor]
+gutters = []
+bufferline = "never"
+end-of-line-diagnostics = "disable"
+
+[editor.inline-diagnostics]
+cursor-line = "hint"
+other-lines = "disable"
+
+[editor.statusline]
+left = []
+center = []
+right = []
+separator = ""

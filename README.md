@@ -15,6 +15,9 @@ A Django and iommi language server that proxies to
   `name=` so the caret lands at the value. At a recognised call site
   we claim **exclusivity**, so ty's "any local variable near `em`"
   noise stays out of the list.
+
+  ![](docs/screenshots/out/orm-completion.png)
+
 * **Typo diagnostics ty can't see.** `django-unknown-orm-lookup`
   warnings fire on kwargs and string field paths that don't resolve
   against the workspace model index. Covers `.filter(...)` /
@@ -22,6 +25,9 @@ A Django and iommi language server that proxies to
   `values_list` / `only` / `defer` / `distinct` / `select_related` /
   `prefetch_related` strings, `Q(...)` / `F('...')` expressions —
   full `__`-traversal through relations and reverse relations.
+
+  ![](docs/screenshots/out/orm-diagnostic.png)
+
 * **No more `Item.objects` false positives.** ty's
   `unresolved-attribute` diagnostics on Django metaclass magic
   (`objects`, `_meta`, `pk`/`id`, `<fk>_id`, reverse relations,
@@ -45,6 +51,9 @@ A Django and iommi language server that proxies to
   containers get a trailing `__` and scalars get `=`. Chains walk
   the iommi refinable graph, so `Table(columns__name__‸` offers
   the configurable surface of `Column`.
+
+  ![](docs/screenshots/out/iommi-refinable.png)
+
 * **`auto__` namespace.** Always surfaces `model` / `rows` /
   `instance` / `include` / `exclude` whether or not the graph
   reflects it, since iommi's default `Namespace()` is empty.
@@ -53,6 +62,9 @@ A Django and iommi language server that proxies to
   so you can keep configuring the auto-generated column). The same
   works inside `auto__include=['‸']` / `auto__exclude=['‸']` string
   literals.
+
+  ![](docs/screenshots/out/iommi-auto-model.png)
+
 * **`iommi-unknown-refinable` diagnostics.** Invalid chains in
   `Class(kw__chain=...)` calls flag the first dead-end segment.
 * **Zero-setup defaults.** Synthesised stubs cover the public iommi
