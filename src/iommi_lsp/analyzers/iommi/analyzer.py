@@ -358,31 +358,70 @@ class IommiAnalyzer:
 
     def _scan(self, parsed: _ParsedFile):
         imports = _collect_imports(parsed.tree)
+        user_iommi_subclasses = _collect_user_iommi_subclasses(
+            parsed.tree, imports, self.graph,
+        )
         for node in ast.walk(parsed.tree):
-            if not isinstance(node, ast.Call):
-                continue
-            cls_qualname = _resolve_callee(node.func, imports)
-            if cls_qualname is None:
-                continue
-            cls = self.graph.get(cls_qualname)
-            if cls is None:
-                # Try simple-name lookup — useful when the user imports
-                # a class via re-export (`from iommi import Table`) but
-                # we recorded it under its source module.
-                simple = cls_qualname.rsplit(".", 1)[-1]
-                cls = self.graph.lookup_simple(simple)
-                if cls is None:
-                    continue
+            if isinstance(node, ast.Call):
+                yield from self._scan_call(parsed, node, imports)
+            elif isinstance(node, ast.ClassDef):
+                yield from self._scan_class_meta(
+                    parsed, node, imports, user_iommi_subclasses,
+                )
 
-            for kw in node.keywords:
-                if kw.arg is None:
-                    continue   # **kwargs splat — skip
-                chain = kw.arg.split("__")
-                result = walk(self.graph, cls.qualname, chain)
+    def _scan_call(
+        self, parsed: _ParsedFile, node: ast.Call, imports: dict[str, str],
+    ):
+        cls_qualname = _resolve_callee(node.func, imports)
+        if cls_qualname is None:
+            return
+        cls = self.graph.get(cls_qualname)
+        if cls is None:
+            # Try simple-name lookup — useful when the user imports
+            # a class via re-export (`from iommi import Table`) but
+            # we recorded it under its source module.
+            simple = cls_qualname.rsplit(".", 1)[-1]
+            cls = self.graph.lookup_simple(simple)
+            if cls is None:
+                return
+
+        for kw in node.keywords:
+            if kw.arg is None:
+                continue   # **kwargs splat — skip
+            chain = kw.arg.split("__")
+            result = walk(self.graph, cls.qualname, chain)
+            if isinstance(result, Problem):
+                diag = _problem_to_diagnostic(parsed.source, kw, chain, result)
+                if diag is not None:
+                    yield diag
+
+    def _scan_class_meta(
+        self,
+        parsed: _ParsedFile,
+        node: ast.ClassDef,
+        imports: dict[str, str],
+        user_iommi_subclasses: dict[str, str],
+    ):
+        """Validate ``class Meta:`` attribute names against the enclosing
+        iommi class's refinables. Per iommi's equivalency docs, names
+        inside ``Meta`` are passed straight through to the constructor —
+        ``class Meta: columns__name__after = 'x'`` is the same as
+        ``Table(columns__name__after='x')``.
+        """
+        cls_qualname = _resolve_iommi_base(
+            node, imports, self.graph, user_iommi_subclasses,
+        )
+        if cls_qualname is None:
+            return
+        meta = _find_meta_class(node)
+        if meta is None:
+            return
+        for stmt in meta.body:
+            for name_node in _meta_assignment_targets(stmt):
+                chain = name_node.id.split("__")
+                result = walk(self.graph, cls_qualname, chain)
                 if isinstance(result, Problem):
-                    diag = _problem_to_diagnostic(parsed.source, kw, chain, result)
-                    if diag is not None:
-                        yield diag
+                    yield _problem_at_name(name_node, chain, result)
 
 
 # ---------------------------------------------------------------------------
@@ -543,6 +582,97 @@ def _flatten_attribute(node: ast.AST) -> str | None:
         parts.append(cur.id)
         return ".".join(reversed(parts))
     return None
+
+
+def _collect_user_iommi_subclasses(
+    tree: ast.Module, imports: dict[str, str], graph: IommiGraph,
+) -> dict[str, str]:
+    """Build a name → iommi-base-qualname map for user-declared classes.
+
+    Walks class defs in source order so a chain like
+    ``class A(Table); class B(A): class Meta: ...`` can be resolved —
+    ``B``'s base ``A`` isn't in the iommi graph, but its iommi ancestor
+    (``Table``) is. We use this map when scanning ``class Meta`` so the
+    Meta is validated against the right refinable surface.
+    """
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        base = _resolve_iommi_base(node, imports, graph, out)
+        if base is not None:
+            out[node.name] = base
+    return out
+
+
+def _resolve_iommi_base(
+    cls_def: ast.ClassDef,
+    imports: dict[str, str],
+    graph: IommiGraph,
+    user_iommi_subclasses: dict[str, str],
+) -> str | None:
+    """First base of *cls_def* that resolves to a class in the iommi graph.
+
+    Recognised forms: direct names (``Table``), module-qualified
+    attributes (``iommi.Table``), and references to another user class
+    already known to ultimately extend an iommi class.
+    """
+    for base in cls_def.bases:
+        qn = _resolve_callee(base, imports)
+        if qn is None:
+            continue
+        cls = graph.get(qn)
+        if cls is not None:
+            return cls.qualname
+        simple = qn.rsplit(".", 1)[-1]
+        cls = graph.lookup_simple(simple)
+        if cls is not None:
+            return cls.qualname
+        if simple in user_iommi_subclasses:
+            return user_iommi_subclasses[simple]
+        if qn in user_iommi_subclasses:
+            return user_iommi_subclasses[qn]
+    return None
+
+
+def _find_meta_class(cls_def: ast.ClassDef) -> ast.ClassDef | None:
+    for stmt in cls_def.body:
+        if isinstance(stmt, ast.ClassDef) and stmt.name == "Meta":
+            return stmt
+    return None
+
+
+def _meta_assignment_targets(stmt: ast.stmt) -> list[ast.Name]:
+    """Names assigned by *stmt* inside a Meta body.
+
+    Only plain ``foo = ...`` and annotated ``foo: T = ...`` count. Tuple
+    targets, attribute targets, and assignments-without-name-targets are
+    not iommi refinable names and are skipped silently.
+    """
+    if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+        return [stmt.target]
+    if isinstance(stmt, ast.Assign):
+        return [t for t in stmt.targets if isinstance(t, ast.Name)]
+    return []
+
+
+def _problem_at_name(
+    name_node: ast.Name, chain: list[str], problem: Problem,
+) -> Diagnostic:
+    """Pin a diagnostic to the bad chain segment within an assignment target."""
+    line0 = (name_node.lineno - 1) if name_node.lineno else 0
+    name_col = name_node.col_offset
+    sep = "__"
+    seg_offset = 0
+    for i, seg in enumerate(chain):
+        if i == problem.segment_index:
+            break
+        seg_offset += len(seg) + len(sep)
+    col_start = name_col + seg_offset
+    col_end = col_start + len(problem.bad_segment)
+    return _make_diagnostic(
+        line0, col_start, col_end, _format_message(problem), problem,
+    )
 
 
 def _problem_to_diagnostic(

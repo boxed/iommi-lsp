@@ -331,6 +331,217 @@ def test_cell_unknown_init_member_is_flagged(traditional_workspace: Path):
     assert line[col_start:col_end] == "val"
 
 
+# ---------------------------------------------------------------------------
+# class Meta pattern (semantically equivalent to kwargs passed to the base)
+# ---------------------------------------------------------------------------
+
+
+def test_class_meta_valid_kwargs(workspace: Path):
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                page_size = 10
+                columns__name__after = "x"
+    """)
+    assert diags == []
+
+
+def test_class_meta_unknown_top_level_kwarg(workspace: Path):
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                bogus_thing = 1
+    """)
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["code"] == "iommi-unknown-refinable"
+    assert d["source"] == "iommi_lsp"
+    assert "bogus_thing" in d["message"]
+    # Range pinned to the attribute name in the Meta body.
+    src = (workspace / "usage.py").read_text()
+    line = src.splitlines()[d["range"]["start"]["line"]]
+    col_start = d["range"]["start"]["character"]
+    col_end = d["range"]["end"]["character"]
+    assert line[col_start:col_end] == "bogus_thing"
+
+
+def test_class_meta_unknown_chain_segment_pins_to_bad_segment(workspace: Path):
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                columns__name__bogus_thing = 1
+    """)
+    assert len(diags) == 1
+    d = diags[0]
+    src = (workspace / "usage.py").read_text()
+    line = src.splitlines()[d["range"]["start"]["line"]]
+    col_start = d["range"]["start"]["character"]
+    col_end = d["range"]["end"]["character"]
+    assert line[col_start:col_end] == "bogus_thing"
+
+
+def test_class_meta_chain_past_scalar(workspace: Path):
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                page_size__nope = 1
+    """)
+    assert len(diags) == 1
+    assert diags[0]["data"]["outcome"] == "trailing_segments_after_leaf"
+
+
+def test_class_meta_html_attrs_ok(workspace: Path):
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                attrs__class__bold = True
+                attrs__data_thing = "hi"
+    """)
+    assert diags == []
+
+
+def test_class_meta_ann_assign_treated_as_kwarg(workspace: Path):
+    """Annotated assignments inside Meta count too — `page_size: int = 10`
+    is just as valid as `page_size = 10`."""
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                page_size: int = 10
+                bogus_thing: int = 1
+    """)
+    assert len(diags) == 1
+    assert "bogus_thing" in diags[0]["message"]
+
+
+def test_class_meta_on_non_iommi_class_is_silent(workspace: Path):
+    diags = _diagnose(workspace, """
+        class Plain:
+            class Meta:
+                bogus = 1
+    """)
+    assert diags == []
+
+
+def test_class_meta_on_user_iommi_subclass_is_flagged(workspace: Path):
+    """A subclass of a known iommi class is itself iommi for Meta validation.
+    `class MyOtherTable(MyTable)` should validate against Table's refinables."""
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            pass
+
+        class MyOtherTable(MyTable):
+            class Meta:
+                bogus_thing = 1
+    """)
+    assert len(diags) == 1
+    assert "bogus_thing" in diags[0]["message"]
+
+
+def test_class_body_assignment_outside_meta_is_silent(workspace: Path):
+    """Outside `class Meta:` the assignments are declarative members
+    (`name = Column()`) or methods — the names are user-defined, not
+    refinables, so we must not flag them."""
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            name = "not a refinable check target"
+            bogus_thing = 1
+
+            def helper(self):
+                pass
+    """)
+    assert diags == []
+
+
+def test_class_meta_module_qualified_base(workspace: Path):
+    diags = _diagnose(workspace, """
+        import iommi
+
+        class MyTable(iommi.Table):
+            class Meta:
+                bogus_thing = 1
+    """)
+    assert len(diags) == 1
+    assert "bogus_thing" in diags[0]["message"]
+
+
+def test_class_meta_traditional_cell_chain(traditional_workspace: Path):
+    """class Meta entries should walk into traditional_class refinables
+    (e.g. ``Column.cell``) just like kwargs do."""
+    diags = _diagnose(traditional_workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                auto__model = User
+                columns__email__cell__value = lambda row, **_: row.email
+                columns__email__cell__val = lambda row, **_: row.email
+    """)
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["data"]["on_class"] == "iommi.table.Cell"
+    assert "val" in d["message"]
+
+
+def test_class_meta_kwargs_and_call_kwargs_coexist(workspace: Path):
+    """Meta validation must not interfere with the existing kwarg
+    diagnostics on the same file."""
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                bogus_meta = 1
+
+        t = Table(bogus_call=1)
+    """)
+    messages = sorted(d["message"] for d in diags)
+    assert len(messages) == 2
+    assert any("bogus_meta" in m for m in messages)
+    assert any("bogus_call" in m for m in messages)
+
+
+def test_class_meta_without_meta_inner_class_is_fine(workspace: Path):
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            pass
+    """)
+    assert diags == []
+
+
+def test_class_meta_non_name_target_is_skipped(workspace: Path):
+    """Tuple/attribute targets inside Meta aren't valid refinable names —
+    don't crash on them, just skip."""
+    diags = _diagnose(workspace, """
+        from iommi import Table
+
+        class MyTable(Table):
+            class Meta:
+                a = b = 10  # multiple targets — first is a Name, that's fine
+    """)
+    # `a` and `b` are both unknown refinables on Table.
+    msgs = sorted(d["message"] for d in diags)
+    assert any("'a'" in m for m in msgs)
+    assert any("'b'" in m for m in msgs)
+
+
 def test_caches_parsed_file(workspace: Path):
     f = _write_usage(workspace, "from iommi import Table\nTable(bogus=1)\n")
     a = IommiAnalyzer(workspace_root=workspace)
