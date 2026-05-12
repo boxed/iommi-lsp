@@ -230,6 +230,107 @@ def test_module_qualified_class_resolves(workspace: Path):
     assert "bogus_thing" in diags[0]["message"]
 
 
+def _make_traditional_cell_graph() -> IommiGraph:
+    """Graph where Column.cell is a traditional_class targeting Cell —
+    i.e. its chain segments validate against Cell.__init__'s public
+    self-assignments rather than Meta-derived namespace keys."""
+    cell = IommiClass(
+        qualname="iommi.table.Cell",
+        bases=[],
+        refinables={},
+        init_members=["url", "url_title", "value", "tag", "contents"],
+    )
+    column = IommiClass(
+        qualname="iommi.table.Column",
+        bases=[],
+        refinables={
+            "cell": _r("cell", "traditional_class", target="iommi.table.Cell"),
+        },
+    )
+    table = IommiClass(
+        qualname="iommi.table.Table",
+        bases=[],
+        refinables={
+            "columns": _r(
+                "columns", "members", member_class="iommi.table.Column",
+            ),
+            "auto": _r(
+                "auto", "namespace",
+                known_keys=["model", "rows", "instance", "include", "exclude"],
+            ),
+        },
+    )
+    return IommiGraph(
+        iommi_version="0.0-test",
+        classes={c.qualname: c for c in [table, column, cell]},
+    )
+
+
+@pytest.fixture
+def traditional_workspace(tmp_path: Path) -> Path:
+    save_graph(_make_traditional_cell_graph(), tmp_path / GRAPH_FILENAME)
+    return tmp_path
+
+
+def test_cell_value_init_member_is_valid(traditional_workspace: Path):
+    """``columns__email__cell__value`` chains through a traditional_class
+    into Cell's init members — ``value`` is one, so no diagnostic."""
+    diags = _diagnose(traditional_workspace, """
+        from iommi import Table
+
+        t = Table(
+            auto__model=User,
+            columns__email__cell__value=lambda row, **_: row.email,
+        )
+    """)
+    assert diags == []
+
+
+def test_cell_value_on_direct_column_call_is_valid(traditional_workspace: Path):
+    """The user-reported case: ``Column(cell__value=…, cell__url=…)``
+    in declarative-table style. ``value`` and ``url`` are both Cell
+    init members, so neither should be flagged."""
+    diags = _diagnose(traditional_workspace, """
+        from iommi import Column, Table
+
+        t = Table(
+            columns=dict(
+                project=Column(
+                    cell__value=lambda row, **_: row.get_short_name(),
+                    cell__url=lambda row, **_: row.get_absolute_url(),
+                ),
+            ),
+        )
+    """)
+    assert diags == []
+
+
+def test_cell_unknown_init_member_is_flagged(traditional_workspace: Path):
+    """``val`` is not a member of Cell — analyzer should flag it and pin
+    the diagnostic to the bad segment within the kwarg name."""
+    diags = _diagnose(traditional_workspace, """
+        from iommi import Table
+
+        t = Table(
+            auto__model=User,
+            columns__email__cell__val=lambda row, **_: row.email,
+        )
+    """)
+    assert len(diags) == 1
+    d = diags[0]
+    assert d["code"] == "iommi-unknown-refinable"
+    assert d["data"]["outcome"] == "unknown_refinable"
+    assert d["data"]["on_class"] == "iommi.table.Cell"
+    assert "val" in d["message"]
+    assert "value" in d["data"]["available"]
+    # The range pins to `val`, not the full kwarg name.
+    src = (traditional_workspace / "usage.py").read_text()
+    line = src.splitlines()[d["range"]["start"]["line"]]
+    col_start = d["range"]["start"]["character"]
+    col_end = d["range"]["end"]["character"]
+    assert line[col_start:col_end] == "val"
+
+
 def test_caches_parsed_file(workspace: Path):
     f = _write_usage(workspace, "from iommi import Table\nTable(bogus=1)\n")
     a = IommiAnalyzer(workspace_root=workspace)

@@ -13,13 +13,26 @@ actually depend on, plus any subclasses they ship as installed packages.
 
 from __future__ import annotations
 
+import ast
 import importlib
+import inspect
 import json
 import os
 import sys
+import textwrap
 from typing import Any
 
 from .graph import IommiClass, IommiGraph, Refinable
+
+
+# Manual overrides for refinables that look like a generic ``Namespace`` or
+# scalar slot but in iommi's runtime actually configure a specific
+# *traditional* (non-RefinableObject) class. The completion logic uses
+# the target's ``init_members`` as the next chain step.
+_TRADITIONAL_TARGETS: dict[str, dict[str, str]] = {
+    "iommi.table.Column": {"cell": "iommi.table.Cell"},
+    "iommi.table.Table": {"cell": "iommi.table.Cell"},
+}
 
 
 # Default seed: the names you'd reach via ``from iommi import ...``.
@@ -173,6 +186,76 @@ def _classify(name: str, refinable_obj: Any, default_value: Any, annotation: Any
     return Refinable(name=name, kind="scalar", refinable_type=rtype)
 
 
+def _collect_init_members(cls: type) -> list[str]:
+    """Public ``self.X = …`` (and ``self.X: T = …``) names assigned in
+    *cls*'s and its parents' ``__init__`` methods.
+
+    Used to surface the configurable surface of "traditional" iommi
+    classes — Cell/CellConfig and friends — that don't declare their API
+    via ``Refinable()`` attributes. We walk ``cls.__mro__`` and AST-parse
+    each class's own ``__init__`` source so the result captures attrs
+    set anywhere in the inheritance chain. Decorator wrappers
+    (e.g. ``@dispatch``) are unwrapped via ``__wrapped__`` when present.
+    """
+    names: set[str] = set()
+    for base in cls.__mro__:
+        if base is object:
+            continue
+        init = base.__dict__.get("__init__")
+        if init is None:
+            continue
+        target = inspect.unwrap(init) if callable(init) else init
+        try:
+            src = inspect.getsource(target)
+        except (OSError, TypeError):
+            continue
+        try:
+            tree = ast.parse(textwrap.dedent(src))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            targets: list[ast.AST]
+            if isinstance(node, ast.Assign):
+                targets = list(node.targets)
+            elif isinstance(node, ast.AnnAssign):
+                targets = [node.target]
+            else:
+                continue
+            for t in targets:
+                if (
+                    isinstance(t, ast.Attribute)
+                    and isinstance(t.value, ast.Name)
+                    and t.value.id == "self"
+                    and not t.attr.startswith("_")
+                ):
+                    names.add(t.attr)
+    return sorted(names)
+
+
+def _apply_traditional_overrides(
+    cls_qualname: str, refinables: dict[str, Refinable]
+) -> None:
+    """Rewrite specific refinables to ``traditional_class`` kind in place.
+
+    iommi declares ``Column.cell``/``Table.cell`` as ``Namespace``/scalar
+    refinables, but at runtime they're passed as kwargs into a
+    ``Cell.__init__`` chain. Static reflection can't see that
+    relationship, so we patch the classification here.
+    """
+    overrides = _TRADITIONAL_TARGETS.get(cls_qualname)
+    if not overrides:
+        return
+    for name, target in overrides.items():
+        existing = refinables.get(name)
+        rtype = existing.refinable_type if existing is not None else ""
+        refinables[name] = Refinable(
+            name=name,
+            kind="traditional_class",
+            refinable_type=rtype,
+            target=target,
+        )
+
+
 def _reflect_class(cls: type) -> IommiClass:
     from iommi.refinable import Refinable as IommiRefinable
 
@@ -188,10 +271,14 @@ def _reflect_class(cls: type) -> IommiClass:
         if isinstance(v, IommiRefinable):
             refinables[n] = _classify(n, v, meta.get(n), annotations.get(n))
 
+    qualname = _qual(cls)
+    _apply_traditional_overrides(qualname, refinables)
+
     return IommiClass(
-        qualname=_qual(cls),
+        qualname=qualname,
         bases=[_qual(b) for b in cls.__mro__[1:] if b is not object],
         refinables=refinables,
+        init_members=_collect_init_members(cls),
     )
 
 
@@ -215,15 +302,18 @@ def build(seeds: list[str] | tuple[str, ...] = DEFAULT_SEEDS) -> IommiGraph:
         if _qual(cls) not in seen:
             seen[_qual(cls)] = _reflect_class(cls)
 
-    # BFS over class_ref targets and members member_classes.
+    # BFS over class_ref / traditional_class targets and members member_classes.
     while queue:
         next_queue: list[str] = []
         for q in queue:
             ic = seen[q]
             for r in ic.refinables.values():
-                follow = r.target if r.kind == "class_ref" else (
-                    r.member_class if r.kind == "members" else None
-                )
+                if r.kind in ("class_ref", "traditional_class"):
+                    follow = r.target
+                elif r.kind == "members":
+                    follow = r.member_class
+                else:
+                    follow = None
                 if not follow or follow in seen:
                     continue
                 cls = _import_seed(follow)

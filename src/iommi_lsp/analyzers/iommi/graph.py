@@ -5,7 +5,7 @@ imports iommi from the user's venv) and dumped to ``.iommi-lsp-graph.json``
 in the workspace root. The LSP loads it at startup and uses it to validate
 ``Class(kw__chain=...)`` calls against iommi's refinable hierarchy.
 
-Six refinable kinds capture iommi's surface:
+Refinable kinds capture iommi's surface:
 
 * ``members`` — open dict of typed values (e.g. ``Dict[str, Column]``).
   ``member_class`` points at the per-entry type, when known.
@@ -14,6 +14,10 @@ Six refinable kinds capture iommi's surface:
 * ``class_ref`` — chain steps into another refinable class. Annotation
   wins over runtime default (``bulk: Optional[Form]`` resolves to ``Form``
   even when the default is a ``Namespace``).
+* ``traditional_class`` — chain steps into a non-refinable class whose
+  configurable surface is the public ``self.X = …`` assignments in its
+  ``__init__``. Used for ``Column.cell`` / ``Table.cell``, which configure
+  a ``Cell`` instance via kwargs but aren't expressed as a Refinable graph.
 * ``namespace`` — structured with a small set of known sub-keys.
 * ``open_namespace`` — empty Namespace default; any keys allowed.
 * ``evaluated_scalar`` / ``scalar`` — leaf; chain ends here.
@@ -28,13 +32,19 @@ from typing import Any, Literal
 
 
 GRAPH_FILENAME = ".iommi-lsp-graph.json"
-SCHEMA_VERSION = 1
+# Bumped when the on-disk shape changes in a way that older readers
+# couldn't validate against. ``load_graph`` treats lower versions as
+# missing so the analyzer rebuilds them in-place.
+#   v1 → initial schema
+#   v2 → introduces ``traditional_class`` kind + ``init_members``
+SCHEMA_VERSION = 2
 
 
 RefinableKind = Literal[
     "members",
     "html_attrs",
     "class_ref",
+    "traditional_class",
     "namespace",
     "open_namespace",
     "evaluated_scalar",
@@ -60,6 +70,10 @@ class IommiClass:
     qualname: str
     bases: list[str]
     refinables: dict[str, Refinable] = field(default_factory=dict)
+    # Public ``self.X = …`` names from this class's (and its parents')
+    # ``__init__``. Surfaced as scalar leaves for ``traditional_class``
+    # refinables whose target is this class.
+    init_members: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -96,6 +110,7 @@ def to_json(graph: IommiGraph) -> str:
                 "qualname": c.qualname,
                 "bases": list(c.bases),
                 "refinables": {n: _refinable_to_dict(r) for n, r in c.refinables.items()},
+                **({"init_members": list(c.init_members)} if c.init_members else {}),
             }
             for q, c in graph.classes.items()
         },
@@ -116,6 +131,7 @@ def from_json(text: str) -> IommiGraph:
             qualname=raw.get("qualname", q),
             bases=list(raw.get("bases") or []),
             refinables=refinables,
+            init_members=list(raw.get("init_members") or []),
         )
     return IommiGraph(
         classes=classes,
@@ -150,12 +166,24 @@ def _refinable_from_dict(d: dict) -> Refinable:
 
 
 def load_graph(path: Path) -> IommiGraph | None:
+    """Read a graph from disk, returning ``None`` if it's missing,
+    corrupt, or written by a schema-incompatible older version.
+
+    Returning ``None`` for an older schema makes the analyzer's index
+    step treat the file as missing and trigger an in-process rebuild,
+    which is exactly what we want: stale graphs would otherwise silently
+    produce wrong diagnostics (e.g. flagging ``cell__value`` because v1
+    didn't know about ``traditional_class``).
+    """
     if not path.exists():
         return None
     try:
-        return from_json(path.read_text(encoding="utf-8"))
+        graph = from_json(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return None
+    if graph.schema_version < SCHEMA_VERSION:
+        return None
+    return graph
 
 
 def save_graph(graph: IommiGraph, path: Path) -> None:

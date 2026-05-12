@@ -216,3 +216,69 @@ def test_non_attrs_namespace_keys_still_pass_through_freely(graph_no_part_attrs)
     # cell.contents is a known key but not "attrs" -> existing permissive
     # behavior (no further validation).
     assert walk(graph_no_part_attrs, "x.Table", ["columns", "name", "cell", "contents", "anything"]) is OK
+
+
+# ---------------------------------------------------------------------------
+# traditional_class — refinable that drills into a non-Refinable class via
+# its ``__init__`` self-assignments. Used for ``Column.cell`` etc.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def graph_with_traditional() -> IommiGraph:
+    column = IommiClass(
+        qualname="x.Column",
+        bases=[],
+        refinables={
+            "cell": _r("cell", "traditional_class", target="x.Cell"),
+        },
+    )
+    cell = IommiClass(
+        qualname="x.Cell",
+        bases=[],
+        refinables={},
+        init_members=["url", "url_title", "value", "tag"],
+    )
+    table = IommiClass(
+        qualname="x.Table",
+        bases=[],
+        refinables={
+            "columns": _r("columns", "members", member_class="x.Column"),
+        },
+    )
+    return IommiGraph(classes={c.qualname: c for c in [table, column, cell]})
+
+
+def test_traditional_class_known_init_member_ok(graph_with_traditional):
+    assert walk(graph_with_traditional, "x.Table",
+                ["columns", "name", "cell", "url"]) is OK
+
+
+def test_traditional_class_unknown_init_member_fails(graph_with_traditional):
+    res = walk(graph_with_traditional, "x.Table",
+               ["columns", "name", "cell", "bogus"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "unknown_refinable"
+    assert res.bad_segment == "bogus"
+    assert res.on_class == "x.Cell"
+    assert "url" in res.available
+
+
+def test_traditional_class_trailing_after_init_member_fails(graph_with_traditional):
+    res = walk(graph_with_traditional, "x.Table",
+               ["columns", "name", "cell", "url", "deeper"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "trailing_segments_after_leaf"
+    assert res.bad_segment == "deeper"
+    assert res.on_class == "x.Cell"
+
+
+def test_traditional_class_without_init_members_passes(graph_with_traditional):
+    """When the graph doesn't know the target's init members, bias toward OK."""
+    g = IommiGraph(classes={
+        "x.Column": IommiClass(
+            qualname="x.Column", bases=[],
+            refinables={"cell": _r("cell", "traditional_class", target="x.NoSuch")},
+        ),
+    })
+    assert walk(g, "x.Column", ["cell", "anything"]) is OK

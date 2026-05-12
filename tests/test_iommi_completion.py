@@ -399,6 +399,106 @@ def test_no_graph_unknown_callable_passes_through(tmp_path):
     assert result.items == []
 
 
+# ---------------------------------------------------------------------------
+# traditional_class — Column.cell drilling into Cell.__init__'s members
+# ---------------------------------------------------------------------------
+
+
+def _make_traditional_graph() -> IommiGraph:
+    cell = IommiClass(
+        qualname="iommi.table.Cell",
+        bases=[],
+        refinables={},
+        init_members=["url", "url_title", "value", "tag", "contents"],
+    )
+    column = IommiClass(
+        qualname="iommi.table.Column",
+        bases=[],
+        refinables={
+            "cell": _r("cell", "traditional_class", target="iommi.table.Cell"),
+            "after": _r("after", "evaluated_scalar"),
+        },
+    )
+    table = IommiClass(
+        qualname="iommi.table.Table",
+        bases=[],
+        refinables={
+            "columns": _r(
+                "columns", "members", member_class="iommi.table.Column",
+            ),
+            "cell": _r("cell", "traditional_class", target="iommi.table.Cell"),
+        },
+    )
+    return IommiGraph(
+        iommi_version="0.0-test",
+        classes={c.qualname: c for c in [table, column, cell]},
+    )
+
+
+@pytest.fixture
+def traditional_analyzer(tmp_path: Path) -> IommiAnalyzer:
+    save_graph(_make_traditional_graph(), tmp_path / GRAPH_FILENAME)
+    a = IommiAnalyzer(workspace_root=tmp_path)
+    asyncio.run(a.index(tmp_path))
+    return a
+
+
+def test_traditional_class_offers_init_members(traditional_analyzer, tmp_path):
+    """``Column(cell__`` lists Cell.__init__ attrs as leaf completions."""
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\nTable(columns__name__cell__",
+    )
+    result = traditional_analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "columns__name__cell__url" in labels
+    assert "columns__name__cell__url_title" in labels
+    assert "columns__name__cell__value" in labels
+    # Leaf — `=` suffix, no `__`.
+    url_item = next(
+        it for it in result.items if it["label"] == "columns__name__cell__url"
+    )
+    assert url_item["insertText"] == "columns__name__cell__url="
+
+
+def test_traditional_class_filters_by_partial(traditional_analyzer, tmp_path):
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\nTable(columns__name__cell__url",
+    )
+    result = traditional_analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert labels == {
+        "columns__name__cell__url",
+        "columns__name__cell__url_title",
+    }
+
+
+def test_traditional_class_at_top_level_on_table(traditional_analyzer, tmp_path):
+    """Table.cell is also a traditional_class — same drill behaviour."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from iommi import Table\nTable(cell__",
+    )
+    result = traditional_analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "cell__url" in labels
+    assert "cell__value" in labels
+
+
+def test_chain_past_traditional_class_leaf_is_empty(traditional_analyzer, tmp_path):
+    """``cell__url__<anything>`` is invalid — no completions to offer."""
+    uri, pos = _write_with_cursor(
+        tmp_path,
+        "from iommi import Table\nTable(columns__name__cell__url__",
+    )
+    result = traditional_analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    assert result.items == []
+
+
 def test_inside_chained_call_for_member_class_refinables(analyzer, tmp_path):
     # `columns__name__cell__attrs__` — html_attrs reached via a namespace key.
     uri, pos = _write_with_cursor(

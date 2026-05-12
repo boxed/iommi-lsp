@@ -68,6 +68,20 @@ def test_load_corrupt_graph_returns_none(tmp_path: Path):
     assert load_graph(f) is None
 
 
+def test_load_rejects_older_schema_version(tmp_path: Path):
+    """Older schemas (v1) lack ``traditional_class`` / ``init_members``.
+    Loading must return None so the analyzer's index step rebuilds the
+    graph — otherwise stale on-disk graphs silently produce wrong
+    diagnostics for users who upgrade iommi-lsp without rebuilding."""
+    f = tmp_path / "old.json"
+    f.write_text(json.dumps({
+        "schema_version": 1,
+        "iommi_version": "7.0.0",
+        "classes": {},
+    }))
+    assert load_graph(f) is None
+
+
 def test_lookup_simple_returns_unique_match(tmp_path: Path):
     g = IommiGraph(classes={
         "iommi.table.Table": IommiClass(qualname="iommi.table.Table", bases=[]),
@@ -129,3 +143,47 @@ def test_reflector_records_iommi_version():
     assert g.iommi_version is not None
     # Loose check — the format is "X.Y.Z" but we don't pin to one version.
     assert g.iommi_version[0].isdigit()
+
+
+def test_reflector_classifies_cell_as_traditional_class():
+    """``Column.cell`` looks like a ``Namespace`` refinable statically, but at
+    runtime its kwargs flow into ``Cell.__init__``. The reflector overrides
+    that to ``traditional_class`` so completion drills into Cell's init
+    members instead of the (incomplete) Meta-derived namespace keys.
+    """
+    from iommi_lsp.analyzers.iommi.reflect import build
+
+    g = build()
+    col = g.get("iommi.table.Column")
+    cell_ref = col.refinables["cell"]
+    assert cell_ref.kind == "traditional_class"
+    assert cell_ref.target == "iommi.table.Cell"
+
+    table = g.get("iommi.table.Table")
+    table_cell = table.refinables["cell"]
+    assert table_cell.kind == "traditional_class"
+    assert table_cell.target == "iommi.table.Cell"
+
+    cell = g.get("iommi.table.Cell")
+    assert cell is not None
+    # CellConfig.__init__ keyword params land as `self.X = X` assignments;
+    # Cell.__init__ adds more. The exact set depends on iommi's version, so
+    # spot-check a stable subset.
+    members = set(cell.init_members)
+    assert {"url", "url_title", "value", "contents", "format", "link"} <= members
+
+
+def test_collect_init_members_handles_decorated_init():
+    """Cell's ``__init__`` is wrapped by ``@dispatch``. _collect_init_members
+    must unwrap so the source can still be AST-parsed.
+    """
+    from iommi.table import Cell
+
+    from iommi_lsp.analyzers.iommi.reflect import _collect_init_members
+
+    names = _collect_init_members(Cell)
+    assert "url" in names
+    assert "value" in names
+    assert "tag" in names
+    # Private attributes are filtered out.
+    assert not any(n.startswith("_") for n in names)

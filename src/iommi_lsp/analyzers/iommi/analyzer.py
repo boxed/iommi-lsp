@@ -787,7 +787,8 @@ def _find_marker_call(tree: ast.AST, marker: str) -> ast.Call | None:
 
 
 _CONTAINER_KINDS = frozenset({
-    "members", "class_ref", "namespace", "open_namespace", "html_attrs",
+    "members", "class_ref", "traditional_class",
+    "namespace", "open_namespace", "html_attrs",
 })
 
 
@@ -1013,6 +1014,22 @@ def _enumerate_from_refinable(
             graph, target, chain, j, partial, prefix, auto_model=auto_model,
         )
 
+    if kind == "traditional_class":
+        if ref.target is None:
+            return None
+        target = graph.get(ref.target)
+        if target is None or not target.init_members:
+            return None
+        if not remaining:
+            return [
+                _init_member_item(name, target.qualname, prefix=prefix)
+                for name in target.init_members
+                if not partial or name.startswith(partial)
+            ]
+        # Any segment past a traditional class's leaf init_member is invalid
+        # — drop completions so the user sees nothing rather than fake hits.
+        return []
+
     if kind == "members":
         if not remaining:
             # User-chosen member-name slot. If iommi auto-binds this
@@ -1084,6 +1101,18 @@ def _namespace_key_item(key: str, cls_qualname: str, *, prefix: str) -> dict:
         "kind": 5,
         "insertText": f"{full}=",
         "detail": "namespace key",
+        "data": {"source": "iommi-lsp.iommi-kwarg", "class": cls_qualname},
+    }
+
+
+def _init_member_item(name: str, cls_qualname: str, *, prefix: str) -> dict:
+    """Init-member completion item — a leaf scalar; suffix with ``=``."""
+    full = f"{prefix}{name}"
+    return {
+        "label": full,
+        "kind": 5,
+        "insertText": f"{full}=",
+        "detail": f"{cls_qualname}.__init__ attribute",
         "data": {"source": "iommi-lsp.iommi-kwarg", "class": cls_qualname},
     }
 

@@ -178,6 +178,54 @@ def _step(
             return OK
         return _walk_from(graph, target, chain, j)
 
+    if refinable.kind == "traditional_class":
+        return _step_traditional(
+            graph, refinable, chain, j, parent_class=parent_class
+        )
+
+    return OK
+
+
+def _step_traditional(
+    graph: IommiGraph,
+    refinable: Refinable,
+    chain: list[str],
+    j: int,
+    *,
+    parent_class: IommiClass,
+) -> WalkResult:
+    """Validate the chain past a ``traditional_class`` refinable.
+
+    The next segment must be one of the target class's ``init_members``
+    (public ``self.X = …`` assignments in its ``__init__`` chain). Each
+    such name is a leaf — nothing legal follows. If the graph doesn't
+    know the target class or its members, bias toward OK so we don't
+    flag valid code as broken.
+    """
+    remaining = chain[j:]
+    if not remaining:
+        return OK
+    if refinable.target is None:
+        return OK
+    target = graph.get(refinable.target)
+    if target is None or not target.init_members:
+        return OK
+    head = remaining[0]
+    if head not in target.init_members:
+        return Problem(
+            outcome="unknown_refinable",
+            bad_segment=head,
+            segment_index=j,
+            on_class=target.qualname,
+            available=tuple(target.init_members),
+        )
+    if len(remaining) > 1:
+        return Problem(
+            outcome="trailing_segments_after_leaf",
+            bad_segment=remaining[1],
+            segment_index=j + 1,
+            on_class=target.qualname,
+        )
     return OK
 
 

@@ -8,6 +8,10 @@
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.action.Action",
       "refinables": {
         "after": {
@@ -84,6 +88,10 @@
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.asset.Asset",
       "refinables": {
         "after": {
@@ -150,6 +158,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.form.Field",
       "refinables": {
@@ -318,6 +330,10 @@
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.form.Form",
       "refinables": {
         "action_class": {
@@ -454,6 +470,10 @@
         "iommi.from_model.AutoConfig",
         "iommi.refinable.RefinableObject"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.form.FormAutoConfig",
       "refinables": {
         "default_included": {
@@ -488,6 +508,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.fragment.Fragment",
       "refinables": {
@@ -552,6 +576,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.menu.Menu",
       "refinables": {
@@ -628,6 +656,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.menu.MenuItem",
       "refinables": {
@@ -723,6 +755,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.page.Page",
       "refinables": {
         "after": {
@@ -784,6 +820,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.panel.Panel",
       "refinables": {
@@ -878,6 +918,10 @@
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.panel.PanelCol",
       "refinables": {
         "after": {
@@ -939,6 +983,10 @@
         "iommi.part.Part",
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.query.Filter",
       "refinables": {
@@ -1030,6 +1078,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.query.Query",
       "refinables": {
@@ -1128,6 +1180,10 @@
         "iommi.from_model.AutoConfig",
         "iommi.refinable.RefinableObject"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.query.QueryAutoConfig",
       "refinables": {
         "default_included": {
@@ -1158,6 +1214,24 @@
         "iommi.fragment.TransientFragment",
         "iommi.fragment.Tag"
       ],
+      "init_members": [
+        "attrs",
+        "cells",
+        "children",
+        "column",
+        "contents",
+        "format",
+        "iommi_style",
+        "link",
+        "parent",
+        "row",
+        "table",
+        "tag",
+        "template",
+        "url",
+        "url_title",
+        "value"
+      ],
       "qualname": "iommi.table.Cell",
       "refinables": {}
     },
@@ -1166,6 +1240,12 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done",
+        "row",
+        "row_index"
       ],
       "qualname": "iommi.table.Cells",
       "refinables": {
@@ -1219,6 +1299,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.table.Column",
       "refinables": {
         "after": {
@@ -1242,13 +1326,9 @@
           "refinable_type": "Refinable"
         },
         "cell": {
-          "kind": "namespace",
-          "known_keys": [
-            "attrs",
-            "contents",
-            "link"
-          ],
-          "refinable_type": "Refinable"
+          "kind": "traditional_class",
+          "refinable_type": "Refinable",
+          "target": "iommi.table.Cell"
         },
         "choices": {
           "kind": "evaluated_scalar",
@@ -1329,6 +1409,10 @@
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.table.RowConfig",
       "refinables": {
         "attrs": {
@@ -1373,6 +1457,11 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done",
+        "value"
       ],
       "qualname": "iommi.table.RowGroup",
       "refinables": {
@@ -1436,6 +1525,10 @@
         "iommi.traversable.Traversable",
         "iommi.refinable.RefinableObject",
         "iommi.fragment.Tag"
+      ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
       ],
       "qualname": "iommi.table.Table",
       "refinables": {
@@ -1501,8 +1594,9 @@
           "refinable_type": "EvaluatedRefinable"
         },
         "cell": {
-          "kind": "evaluated_scalar",
-          "refinable_type": "EvaluatedRefinable"
+          "kind": "traditional_class",
+          "refinable_type": "EvaluatedRefinable",
+          "target": "iommi.table.Cell"
         },
         "cells_class": {
           "kind": "class_ref",
@@ -1656,6 +1750,10 @@
         "iommi.from_model.AutoConfig",
         "iommi.refinable.RefinableObject"
       ],
+      "init_members": [
+        "iommi_namespace",
+        "is_refine_done"
+      ],
       "qualname": "iommi.table.TableAutoConfig",
       "refinables": {
         "default_included": {
@@ -1682,5 +1780,5 @@
     }
   },
   "iommi_version": "7.25.1",
-  "schema_version": 1
+  "schema_version": 2
 }
