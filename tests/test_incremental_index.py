@@ -95,6 +95,49 @@ def test_analyzer_on_file_changed_picks_up_new_model(workspace: Path):
     assert "orders" in analyzer.django_index.reverse_relations["shop.models.Item"]
 
 
+def test_analyzer_skips_reassembly_for_classless_file(
+    workspace: Path, monkeypatch
+):
+    """A keystroke in a file with no class definitions must not rebuild
+    the whole index — that's what caused the per-keystroke ``indexed …``
+    log storm in real editors."""
+    from iommi_lsp.analyzers.django import index as index_mod
+
+    _write(workspace / "shop" / "utils.py", "x = 1\n")
+    analyzer = DjangoAnalyzer(workspace_root=workspace)
+    asyncio.run(analyzer.index(workspace))
+
+    assemble_calls = {"n": 0}
+    original_assemble = index_mod.assemble_index
+
+    def counting_assemble(*a, **kw):
+        assemble_calls["n"] += 1
+        return original_assemble(*a, **kw)
+
+    monkeypatch.setattr(
+        "iommi_lsp.analyzers.django.analyzer.assemble_index", counting_assemble
+    )
+
+    # Edit a non-model file: classless before AND after — skip path.
+    _write(workspace / "shop" / "utils.py", "x = 2\n")
+    asyncio.run(analyzer.on_file_changed((workspace / "shop" / "utils.py").as_uri()))
+    assert assemble_calls["n"] == 0, "no class defs → no need to reassemble"
+
+    # Edit the models file: must still reassemble.
+    _write(workspace / "shop" / "models.py", """
+        from django.db import models
+
+        class Item(models.Model):
+            name = models.CharField(max_length=80)
+
+        class Order(models.Model):
+            item = models.ForeignKey(Item, on_delete=models.CASCADE)
+    """)
+    asyncio.run(analyzer.on_file_changed((workspace / "shop" / "models.py").as_uri()))
+    assert assemble_calls["n"] == 1
+    assert "shop.models.Order" in analyzer.django_index.models
+
+
 def test_analyzer_incremental_does_not_re_walk_workspace(
     workspace: Path, monkeypatch
 ):

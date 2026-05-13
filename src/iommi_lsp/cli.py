@@ -24,6 +24,8 @@ from . import __version__, log, proxy
 from .analyzers.django import DjangoAnalyzer, build_index
 from .analyzers.iommi import IommiAnalyzer
 from .analyzers.iommi.build import GraphBuildError, build_for_workspace
+from .analyzers.settings import SettingsAnalyzer
+from .analyzers.templates import TemplateAnalyzer
 from .interceptor import (
     CompletionMatchmaker,
     DiagnosticInterceptor,
@@ -140,7 +142,18 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         # completions when the call carries ``auto__model=Model``.
         django_index_provider=lambda: django_analyzer.django_index,
     )
-    analyzers = [django_analyzer, iommi_analyzer]
+    template_analyzer = TemplateAnalyzer(
+        workspace_root=root, text_provider=documents.get,
+    )
+    settings_analyzer = SettingsAnalyzer(
+        workspace_root=root,
+        text_provider=documents.get,
+        # AUTH_USER_MODEL completion draws on workspace models.
+        django_index_provider=lambda: django_analyzer.django_index,
+    )
+    analyzers = [
+        django_analyzer, iommi_analyzer, template_analyzer, settings_analyzer,
+    ]
 
     interceptor = DiagnosticInterceptor(analyzers=analyzers)
     matchmaker = CompletionMatchmaker(

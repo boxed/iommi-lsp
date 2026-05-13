@@ -252,7 +252,7 @@ def _ensure_completion_capability(payload: dict, original_body: bytes) -> bytes:
     if "completionProvider" in caps:
         return original_body
     caps["completionProvider"] = {
-        "triggerCharacters": ["(", ","],
+        "triggerCharacters": ["(", ",", "/"],
         "resolveProvider": False,
     }
     return json.dumps(payload, separators=(",", ":")).encode("utf-8")

@@ -644,12 +644,6 @@ def assemble_index(
                 continue
             index.reverse_relations[target][reverse_name] = info.qualname
 
-    _log.info(
-        "indexed %s: %d models, %d reverse relations",
-        workspace_root,
-        len(index.models),
-        sum(len(v) for v in index.reverse_relations.values()),
-    )
     return index
 
 

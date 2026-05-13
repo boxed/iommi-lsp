@@ -117,6 +117,12 @@ class DjangoAnalyzer:
         self._scrapes = collect_scrapes(workspace_root)
         self.django_index = assemble_index(workspace_root, self._scrapes)
         self._cache.clear()
+        _log.info(
+            "indexed %s: %d models, %d reverse relations",
+            workspace_root,
+            len(self.django_index.models),
+            sum(len(v) for v in self.django_index.reverse_relations.values()),
+        )
 
     async def on_file_changed(self, uri: str) -> None:
         self._cache.pop(uri, None)
@@ -126,7 +132,15 @@ class DjangoAnalyzer:
         # Incremental: only re-parse the changed file, then re-run
         # classification + reverse-relation computation against the
         # cached scrape map. ~milliseconds even on large workspaces.
+        key = path.resolve()
+        had_classes = bool(self._scrapes.get(key) and self._scrapes[key].classes)
         update_scrapes(self.workspace_root, self._scrapes, path)
+        has_classes = bool(self._scrapes.get(key) and self._scrapes[key].classes)
+        # No class definitions before or after the edit → the index can't
+        # have changed. Skip the reassembly to avoid burning CPU on every
+        # keystroke in unrelated files.
+        if not had_classes and not has_classes:
+            return
         self.django_index = assemble_index(self.workspace_root, self._scrapes)
 
     # -- internals ------------------------------------------------------------

@@ -11,6 +11,10 @@ theme = "catppuccin_mocha"
 gutters = []
 bufferline = "never"
 end-of-line-diagnostics = "disable"
+# Disable Helix's built-in filesystem path completion — it backfills any
+# `/`-containing string popup with workspace files, which is noise next
+# to the LSP's template-name suggestions.
+path-completion = false
 
 [editor.inline-diagnostics]
 cursor-line = "hint"

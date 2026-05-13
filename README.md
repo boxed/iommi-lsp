@@ -28,6 +28,24 @@ A Django and iommi language server that proxies to
 
   ![](docs/screenshots/out/orm-diagnostic.png)
 
+* **Template-name completion in any `/`-containing string.** Once the
+  workspace is indexed, typing `'myapp/‸'` (where `‸` is the cursor)
+  offers every file under any `templates/` directory in the project.
+  Non-exclusive: ty's path-style suggestions still come through so
+  non-template paths aren't suppressed.
+
+  ![](docs/screenshots/out/template-completion.png)
+
+* **`INSTALLED_APPS` / settings completion.** Inside `INSTALLED_APPS`,
+  `MIDDLEWARE`, `AUTHENTICATION_BACKENDS`, `AUTH_USER_MODEL`,
+  `DEFAULT_AUTO_FIELD`, `WSGI_APPLICATION`,
+  `AUTH_PASSWORD_VALIDATORS`, and `DEFAULT_EXCEPTION_REPORTER` string
+  values, you get the appropriate set of dotted-path suggestions —
+  Django's contribs and middleware, workspace apps (any package with
+  `apps.py`), workspace models in `app_label.ModelName` form, etc.
+
+  ![](docs/screenshots/out/settings-installed-apps.png)
+
 * **No more `Item.objects` false positives.** ty's
   `unresolved-attribute` diagnostics on Django metaclass magic
   (`objects`, `_meta`, `pk`/`id`, `<fk>_id`, reverse relations,
