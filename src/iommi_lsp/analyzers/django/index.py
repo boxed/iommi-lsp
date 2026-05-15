@@ -41,6 +41,13 @@ class FieldInfo:
     related_name: str | None = None
     is_pk: bool = False        # explicit primary_key=True
     has_choices: bool = False  # any `choices=` kwarg present → get_FOO_display method
+    # Source location of the field's *name* token (the LHS of the
+    # ``name = Field(...)`` assignment) — used to back jump-to-definition
+    # for reverse-relation accessors. Zero values mean "unknown" (set for
+    # fields propagated through abstract bases or sourced from builtin
+    # stubs, where the AST source isn't a single concrete line).
+    defined_at_line: int = 0   # 1-based, matching ast.lineno
+    defined_at_col: int = 0    # 0-based, matching ast.col_offset
 
 
 @dataclass
@@ -138,6 +145,37 @@ class DjangoIndex:
     def reverse_source(self, model_qualname: str, reverse_name: str) -> str | None:
         """Source model qualname for a reverse accessor on *model_qualname*."""
         return self.reverse_relations.get(model_qualname, {}).get(reverse_name)
+
+    def reverse_field(
+        self, target_qualname: str, reverse_name: str,
+    ) -> tuple[ModelInfo, FieldInfo] | None:
+        """Find the source ``FieldInfo`` behind a reverse accessor.
+
+        Given ``x.foos`` where ``x`` is a ``Foo`` instance, returns the
+        ``(source_model, field)`` pair for the FK / M2M / O2O field whose
+        ``related_name`` is ``"foos"`` (or whose default ``<lower>_set``
+        matches). Used to back jump-to-definition: the ``field``'s
+        ``defined_at_line`` / ``defined_at_col`` point at the declaration
+        site in the source model.
+        """
+        source_qualname = self.reverse_source(target_qualname, reverse_name)
+        if source_qualname is None:
+            return None
+        source_model = self.models.get(source_qualname)
+        if source_model is None:
+            return None
+        for fi in source_model.fields.values():
+            if fi.field_type not in RELATION_FIELD_NAMES:
+                continue
+            if fi.target != target_qualname:
+                # Self-referential FKs use the source's own qualname as
+                # target; reverse_source already filtered, so a mismatch
+                # here means a different relation.
+                continue
+            name = fi.related_name or f"{source_model.name.lower()}_set"
+            if name == reverse_name:
+                return source_model, fi
+        return None
 
     def lookup(self, simple_name: str) -> ModelInfo | None:
         """Return a model by simple class name; None if ambiguous or absent.
@@ -505,11 +543,17 @@ def _populate_fields(
             continue
         if not isinstance(stmt.value, ast.Call):
             continue
-        field_name = stmt.targets[0].id
+        target_name_node = stmt.targets[0]
+        field_name = target_name_node.id
         ftype = _call_field_name(stmt.value, file_imports, field_aliases)
         if ftype is None:
             continue
-        fi = FieldInfo(name=field_name, field_type=ftype)
+        fi = FieldInfo(
+            name=field_name,
+            field_type=ftype,
+            defined_at_line=target_name_node.lineno,
+            defined_at_col=target_name_node.col_offset,
+        )
         # Inspect kwargs.
         for kw in stmt.value.keywords:
             if kw.arg == "primary_key" and _bool_value(kw.value):

@@ -34,6 +34,7 @@ from .analyzers.urls import UrlAnalyzer
 from .analyzers.views import ViewsAnalyzer
 from .interceptor import (
     CompletionMatchmaker,
+    DefinitionRouter,
     DiagnosticInterceptor,
     DocumentStore,
     EditorRequestSniffer,
@@ -212,6 +213,7 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
     matchmaker = CompletionMatchmaker(
         analyzers=analyzers, text_provider=documents.get,
     )
+    definition_router = DefinitionRouter(analyzers=analyzers)
 
     async def workspace_seen(root: Path) -> None:
         for a in analyzers:
@@ -227,22 +229,30 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         document_store=documents,
     )
 
-    editor_to_ty = _chain_hooks(sniffer, matchmaker.on_request)
-    ty_to_editor = _chain_hooks(matchmaker.on_response, interceptor)
+    editor_to_ty = _chain_hooks(
+        sniffer, matchmaker.on_request, definition_router.on_request,
+    )
+    ty_to_editor = _chain_hooks(
+        matchmaker.on_response, definition_router.on_response, interceptor,
+    )
 
     backend_env = _backend_env(root, os.environ)
+
+    def attach_writer(writer) -> None:
+        matchmaker.attach_editor_writer(writer)
+        definition_router.attach_editor_writer(writer)
 
     if workspace is not None:
         return asyncio.run(_eager_index_then_serve(
             ty_command, analyzers, workspace, editor_to_ty, ty_to_editor, backend_env,
-            on_writer_ready=matchmaker.attach_editor_writer,
+            on_writer_ready=attach_writer,
         ))
     return asyncio.run(proxy.run(
         ty_command,
         editor_to_ty_hook=editor_to_ty,
         ty_to_editor_hook=ty_to_editor,
         env=backend_env,
-        on_writer_ready=matchmaker.attach_editor_writer,
+        on_writer_ready=attach_writer,
     ))
 
 

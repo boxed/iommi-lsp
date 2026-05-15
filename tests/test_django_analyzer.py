@@ -756,6 +756,136 @@ def test_hidden_reverse_with_plus_is_kept(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is False
 
 
+def test_self_referential_related_name_reverse_is_dropped(tmp_path: Path):
+    """``ForeignKey(Foo, related_name='foos')`` — the reverse ``x.foos`` on a
+    ``Foo`` instance must not warn from ty. Covers the case where the
+    related_name lives on a sibling model pointing back at ``Foo``.
+    """
+    models_src = (
+        "from django.db import models\n"
+        "\n"
+        "class Foo(models.Model):\n"
+        "    name = models.CharField(max_length=200)\n"
+        "\n"
+        "class FooChild(models.Model):\n"
+        "    parent = models.ForeignKey(\n"
+        "        Foo, on_delete=models.CASCADE, related_name='foos',\n"
+        "    )\n"
+    )
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "models.py").write_text(models_src)
+
+    user_src = (
+        "from app.models import Foo\n"
+        "\n"
+        "def f(x: Foo):\n"
+        "    return x.foos\n"
+    )
+    u = tmp_path / "u.py"
+    u.write_text(user_src)
+
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    line = 3
+    start = user_src.splitlines()[line].index("foos")
+    diag = _diag(line, start, start + len("foos"), "foos")
+
+    assert a.is_false_positive(u.as_uri(), diag) is True
+
+
+def test_resolve_definition_jumps_to_related_name_fk(tmp_path: Path):
+    """``x.foos`` should resolve to the ``parent = ForeignKey(Foo,
+    related_name='foos')`` declaration on the source model."""
+    models_src = (
+        "from django.db import models\n"
+        "\n"
+        "class Foo(models.Model):\n"
+        "    name = models.CharField(max_length=200)\n"
+        "\n"
+        "class FooChild(models.Model):\n"
+        "    parent = models.ForeignKey(\n"
+        "        Foo, on_delete=models.CASCADE, related_name='foos',\n"
+        "    )\n"
+    )
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    models_path = tmp_path / "app" / "models.py"
+    models_path.write_text(models_src)
+
+    user_src = (
+        "from app.models import Foo\n"
+        "\n"
+        "def f(x: Foo):\n"
+        "    return x.foos\n"
+    )
+    u = tmp_path / "u.py"
+    u.write_text(user_src)
+
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    # Cursor sits inside the ``foos`` token on the ``return x.foos`` line.
+    line = 3
+    foos_col = user_src.splitlines()[line].index("foos")
+    loc = a.resolve_definition(
+        u.as_uri(), {"line": line, "character": foos_col + 1},
+    )
+    assert loc is not None
+    assert loc["uri"] == models_path.as_uri()
+
+    # The range points at the ``parent`` token on its declaration line.
+    models_lines = models_src.splitlines()
+    # FieldInfo records the LHS-name token's location; for the wrapped
+    # ForeignKey call the assignment statement begins on the ``parent =``
+    # line, and ast.lineno/col_offset for the target Name node match that.
+    expected_line = next(
+        i for i, ln in enumerate(models_lines) if ln.lstrip().startswith("parent =")
+    )
+    expected_col = models_lines[expected_line].index("parent")
+    assert loc["range"]["start"] == {"line": expected_line, "character": expected_col}
+    assert loc["range"]["end"] == {
+        "line": expected_line,
+        "character": expected_col + len("parent"),
+    }
+
+
+def test_resolve_definition_returns_none_for_non_reverse_attr(tmp_path: Path):
+    """``x.unrelated`` shouldn't get hijacked — let ty answer."""
+    models_src = (
+        "from django.db import models\n"
+        "\n"
+        "class Foo(models.Model):\n"
+        "    name = models.CharField(max_length=200)\n"
+        "\n"
+        "class FooChild(models.Model):\n"
+        "    parent = models.ForeignKey(\n"
+        "        Foo, on_delete=models.CASCADE, related_name='foos',\n"
+        "    )\n"
+    )
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "models.py").write_text(models_src)
+
+    user_src = (
+        "from app.models import Foo\n"
+        "\n"
+        "def f(x: Foo):\n"
+        "    return x.name\n"
+    )
+    u = tmp_path / "u.py"
+    u.write_text(user_src)
+
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    line = 3
+    col = user_src.splitlines()[line].index("name") + 1
+    loc = a.resolve_definition(u.as_uri(), {"line": line, "character": col})
+    assert loc is None
+
+
 def test_fk_id_accessor_is_dropped(tmp_path: Path):
     src = (
         "from myapp.models import Profile\n"

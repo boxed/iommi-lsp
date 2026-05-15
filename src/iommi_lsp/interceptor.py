@@ -37,6 +37,7 @@ DID_CHANGE = "textDocument/didChange"
 DID_SAVE = "textDocument/didSave"
 DID_CLOSE = "textDocument/didClose"
 COMPLETION = "textDocument/completion"
+DEFINITION = "textDocument/definition"
 CANCEL_REQUEST = "$/cancelRequest"
 
 
@@ -627,6 +628,119 @@ class CompletionMatchmaker:
 # ---------------------------------------------------------------------------
 # Editor → ty hook: workspace sniffing and file-change notifications.
 # ---------------------------------------------------------------------------
+
+
+class DefinitionRouter:
+    """Two-sided hook that handles ``textDocument/definition`` for Django
+    metaclass magic that ty can't see (currently: reverse-relation
+    accessors).
+
+    Editor → ty: for each ``textDocument/definition`` request, ask each
+    analyzer that exposes ``resolve_definition``. If any returns a
+    Location, write the synthesized response straight back to the editor
+    and drop the forward — ty's answer (``null``) would clobber ours
+    racily otherwise. If no analyzer claims the position, forward the
+    request to ty unchanged.
+
+    ty → editor: patch the ``initialize`` response so the editor knows
+    we offer go-to-definition even when ty's own ``definitionProvider``
+    is absent. Has no effect when ty already advertises it.
+    """
+
+    def __init__(self, analyzers: Sequence[Analyzer] = ()) -> None:
+        self.analyzers = list(analyzers)
+        self._editor_writer: asyncio.StreamWriter | None = None
+        self._pending_initialize: set[Any] = set()
+
+    def attach_editor_writer(self, writer: asyncio.StreamWriter) -> None:
+        self._editor_writer = writer
+
+    async def on_request(self, body: bytes) -> bytes | None:
+        if not body or body[:1] != b"{":
+            return body
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict):
+            return body
+        method = payload.get("method")
+        msg_id = payload.get("id")
+        if method == INITIALIZE and msg_id is not None:
+            self._pending_initialize.add(msg_id)
+            return body
+        if method != DEFINITION or msg_id is None:
+            return body
+        if self._editor_writer is None:
+            return body
+        params = payload.get("params") or {}
+        doc = params.get("textDocument") or {}
+        uri = doc.get("uri")
+        position = params.get("position")
+        if not (isinstance(uri, str) and isinstance(position, dict)):
+            return body
+
+        location: dict | None = None
+        for a in self.analyzers:
+            resolver = getattr(a, "resolve_definition", None)
+            if resolver is None:
+                continue
+            try:
+                location = resolver(uri, position)
+            except Exception:
+                _log.exception(
+                    "analyzer %s resolve_definition crashed",
+                    getattr(a, "name", a),
+                )
+                continue
+            if location is not None:
+                break
+
+        if location is None:
+            return body
+
+        synth = json.dumps(
+            {"jsonrpc": "2.0", "id": msg_id, "result": location},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        try:
+            await jsonrpc.write_message(self._editor_writer, synth)
+        except Exception:
+            _log.exception("synthetic definition write failed; falling back")
+            return body
+        return None   # don't forward to ty
+
+    async def on_response(self, body: bytes) -> bytes | None:
+        if not body or body[:1] != b"{":
+            return body
+        try:
+            payload: Any = json.loads(body)
+        except json.JSONDecodeError:
+            return body
+        if not isinstance(payload, dict):
+            return body
+        msg_id = payload.get("id")
+        if msg_id is None or msg_id not in self._pending_initialize:
+            return body
+        self._pending_initialize.discard(msg_id)
+        return _ensure_definition_capability(payload, body)
+
+
+def _ensure_definition_capability(payload: dict, original_body: bytes) -> bytes:
+    """Patch an ``initialize`` response so the editor knows we offer
+    go-to-definition. If ty already advertises ``definitionProvider`` we
+    leave the payload alone."""
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return original_body
+    caps = result.get("capabilities")
+    if not isinstance(caps, dict):
+        caps = {}
+        result["capabilities"] = caps
+    if "definitionProvider" in caps:
+        return original_body
+    caps["definitionProvider"] = True
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
 
 WorkspaceCallback = Callable[[Path], Awaitable[None]]

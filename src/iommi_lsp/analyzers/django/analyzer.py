@@ -640,6 +640,72 @@ class DjangoAnalyzer:
                 return True
         return False
 
+    def resolve_definition(self, uri: str, position: dict) -> dict | None:
+        """Resolve a jump-to-definition request on a Django-magic accessor.
+
+        Currently handles reverse-relation accessors only — given a cursor
+        on ``x.foos`` where ``x`` resolves to a model and ``foos`` is a
+        reverse accessor (declared via ``ForeignKey(Foo, related_name='foos')``
+        on some source model, or the default ``<lower>_set``), returns an
+        LSP ``Location`` dict pointing at the field's declaration. Returns
+        ``None`` for everything else so the request can fall through to ty.
+        """
+        if not self.config.is_rule_enabled("reverse"):
+            return None
+        path = _uri_to_path(uri)
+        if path is None:
+            return None
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return None
+
+        line = int(position.get("line", 0))
+        character = int(position.get("character", 0))
+        # _find_attribute_at takes a Range; a point cursor is start==end.
+        point_range = {
+            "start": {"line": line, "character": character},
+            "end": {"line": line, "character": character},
+        }
+        attr_node = _find_attribute_at(parsed.tree, point_range)
+        if attr_node is None:
+            return None
+
+        # The cursor must actually be on the attribute's name span, not on
+        # the receiver portion. ``attr_node`` spans the whole ``x.foos``;
+        # the attr token sits at the end. Reject when the cursor lies left
+        # of the dot.
+        if not _position_within_attr_name(parsed.source, attr_node, line, character):
+            return None
+
+        attr_name = attr_node.attr
+        receiver = attr_node.value
+        model = self._resolve_receiver_model(receiver, parsed.tree)
+        if model is None:
+            model = self._resolve_via_annotation(receiver, parsed.tree)
+        if model is None:
+            return None
+
+        found = self.django_index.reverse_field(model.qualname, attr_name)
+        if found is None:
+            return None
+        source_model, fi = found
+        if fi.defined_at_line == 0:
+            # Builtin stub or inherited-via-abstract field — no AST source.
+            return None
+        return {
+            "uri": source_model.file_path.as_uri(),
+            "range": {
+                "start": {
+                    "line": fi.defined_at_line - 1,  # LSP is 0-based
+                    "character": fi.defined_at_col,
+                },
+                "end": {
+                    "line": fi.defined_at_line - 1,
+                    "character": fi.defined_at_col + len(fi.name),
+                },
+            },
+        }
+
     def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
         if not self.config.is_rule_enabled("orm_lookup"):
             return []
@@ -1379,6 +1445,44 @@ def _uri_to_path(uri: str) -> Path | None:
         return None
     parsed = urlparse(uri)
     return Path(unquote(parsed.path))
+
+
+def _position_within_attr_name(
+    source: str, attr_node: ast.Attribute, line: int, character: int,
+) -> bool:
+    """Whether the LSP position (0-based) lies within ``attr_node``'s
+    attribute-name span (the part after the dot).
+
+    ``ast.Attribute`` exposes only the *whole* expression's location; the
+    name-token's column isn't tracked. We approximate by walking the
+    source from the receiver's end forward to the next ``.`` and
+    declaring the attribute span to be everything after it. This is good
+    enough — comments and odd whitespace between receiver and dot are
+    rare in real code.
+    """
+    # ast lines are 1-based.
+    attr_line_1based = attr_node.end_lineno or (attr_node.lineno)
+    attr_end_col = attr_node.end_col_offset or attr_node.col_offset
+    # Look up the start of the attribute name. Use receiver's end as the
+    # anchor; everything to the right of the next ``.`` is the attribute.
+    recv = attr_node.value
+    recv_end_line = (recv.end_lineno or recv.lineno) - 1
+    recv_end_col = recv.end_col_offset or recv.col_offset
+    # The position must be on the same line as the attribute's end, and
+    # to the right of the receiver's end (with a ``.`` between them).
+    if line != (attr_line_1based - 1):
+        return False
+    # Find the column of the dot following the receiver. Pull the line
+    # text and search forward.
+    lines = source.splitlines()
+    if recv_end_line >= len(lines):
+        return False
+    line_text = lines[recv_end_line]
+    dot_col = line_text.find(".", recv_end_col)
+    if dot_col < 0:
+        return False
+    name_start = dot_col + 1
+    return name_start <= character <= attr_end_col
 
 
 def _find_attribute_at(tree: ast.Module, range_: dict) -> ast.Attribute | None:
