@@ -389,11 +389,20 @@ def _bool_value(node: ast.AST) -> bool | None:
     return None
 
 
-def _call_field_name(call: ast.Call, file_imports: dict[str, str]) -> str | None:
+def _call_field_name(
+    call: ast.Call,
+    file_imports: dict[str, str],
+    field_aliases: dict[str, str] | None = None,
+) -> str | None:
     """If *call* looks like a Django field constructor, return its short name.
 
     Handles ``models.CharField(...)``, ``CharField(...)`` (when imported),
     and fully-qualified ``django.db.models.CharField(...)``.
+
+    When *field_aliases* is supplied, a constructor whose class subclasses
+    one of Django's relation field types (e.g. ``MyCustomFK(models.ForeignKey)``)
+    is rewritten to the canonical parent name so downstream code that
+    checks ``field_type in RELATION_FIELD_NAMES`` still matches.
     """
     flat = _flatten_attribute(call.func)
     if flat is None:
@@ -406,12 +415,20 @@ def _call_field_name(call: ast.Call, file_imports: dict[str, str]) -> str | None
     if head in file_imports:
         full = file_imports[head]
         flat = f"{full}.{tail}" if tail else full
+    if field_aliases:
+        alias = field_aliases.get(flat)
+        if alias is not None:
+            return alias
     # Accept anything from django.db.models.* and any unqualified name —
     # we can't be 100% sure about unqualified, but for filtering purposes
     # over-matching is harmless (we'd record extra "fields" on a non-model
     # class, but that class wouldn't be in the model index in the first
     # place).
     last = flat.rsplit(".", 1)[-1]
+    if field_aliases:
+        alias = field_aliases.get(last)
+        if alias is not None:
+            return alias
     return last
 
 
@@ -478,6 +495,7 @@ def _populate_fields(
     class_node: ast.ClassDef,
     file_imports: dict[str, str],
     index: DjangoIndex,
+    field_aliases: dict[str, str] | None = None,
 ) -> None:
     for stmt in class_node.body:
         # Only top-level `name = Field(...)` style declarations.
@@ -488,7 +506,7 @@ def _populate_fields(
         if not isinstance(stmt.value, ast.Call):
             continue
         field_name = stmt.targets[0].id
-        ftype = _call_field_name(stmt.value, file_imports)
+        ftype = _call_field_name(stmt.value, file_imports, field_aliases)
         if ftype is None:
             continue
         fi = FieldInfo(name=field_name, field_type=ftype)
@@ -632,6 +650,7 @@ def assemble_index(
         file_imports[path] = scrape.imports
 
     model_raws = _classify_models(raws)
+    field_aliases = _classify_field_aliases(raws)
     index = DjangoIndex()
 
     # First pass: instantiate ModelInfo so cross-references resolve.
@@ -654,6 +673,7 @@ def assemble_index(
             raw.node,
             file_imports.get(raw.file_path, {}),
             index,
+            field_aliases,
         )
 
     # Third pass: propagate inherited fields. Django's metaclass copies
@@ -711,6 +731,80 @@ _QUERYSET_BASES = frozenset({
     "django.db.models.manager.BaseManager",
     "django.db.models.manager.Manager",
 })
+
+
+# Canonical Django qualnames for the relation field types whose subclasses
+# we want to recognise as their parent. ``OneToOneField`` itself extends
+# ``ForeignKey`` at runtime, but we treat it as its own canonical name —
+# matching the rest of the analyzer, which checks the literal string.
+_RELATION_FIELD_QUALNAMES: dict[str, str] = {
+    "django.db.models.ForeignKey": "ForeignKey",
+    "django.db.models.OneToOneField": "OneToOneField",
+    "django.db.models.ManyToManyField": "ManyToManyField",
+}
+
+
+def _classify_field_aliases(raws: list[_RawClass]) -> dict[str, str]:
+    """Map workspace classes that subclass a Django relation field to the
+    canonical parent's short name.
+
+    Runtime Django treats ``class MyFK(models.ForeignKey): ...`` exactly
+    like a ``ForeignKey`` for the purposes that matter here (reverse
+    relations, ``<name>_id`` accessor, M2M.through). Our checks key off
+    the literal ``field_type`` string, so resolve subclass names back to
+    the parent before recording the field.
+
+    Returned map covers both fully-qualified names (e.g.
+    ``"myapp.fields.MyFK"``) and unambiguous simple names (e.g. ``"MyFK"``)
+    so :func:`_call_field_name` can resolve regardless of how the field
+    class is referenced in user code.
+    """
+    qualname_to_raw = {r.qualname: r for r in raws}
+    by_simple: dict[str, list[_RawClass]] = defaultdict(list)
+    for r in raws:
+        by_simple[r.name].append(r)
+
+    canonical: dict[str, str] = {}  # qualname -> canonical short name
+
+    def _base_canonical(base: str) -> str | None:
+        c = _RELATION_FIELD_QUALNAMES.get(base)
+        if c is not None:
+            return c
+        c = canonical.get(base)
+        if c is not None:
+            return c
+        head = base.rsplit(".", 1)[-1]
+        for cls in by_simple.get(head, ()):
+            c = canonical.get(cls.qualname)
+            if c is not None:
+                return c
+        return None
+
+    changed = True
+    while changed:
+        changed = False
+        for r in raws:
+            if r.qualname in canonical:
+                continue
+            for base in r.resolved_bases:
+                c = _base_canonical(base)
+                if c is not None:
+                    canonical[r.qualname] = c
+                    changed = True
+                    break
+
+    aliases: dict[str, str] = dict(_RELATION_FIELD_QUALNAMES)
+    aliases.update(canonical)
+    # Add unambiguous simple-name aliases so unresolved bare references
+    # (``class MyFK(models.ForeignKey)`` then ``MyFK(...)`` in the same
+    # module without an explicit import line) still get rewritten.
+    simple_seen: dict[str, set[str]] = defaultdict(set)
+    for qn, c in canonical.items():
+        simple_seen[qn.rsplit(".", 1)[-1]].add(c)
+    for simple, vals in simple_seen.items():
+        if len(vals) == 1:
+            aliases.setdefault(simple, next(iter(vals)))
+    return aliases
 
 
 def _collect_queryset_method_names(raws: list[_RawClass]) -> set[str]:

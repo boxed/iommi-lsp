@@ -117,6 +117,17 @@ def _step(
     remaining = chain[j:]
     if refinable.kind == "scalar" or refinable.kind == "evaluated_scalar":
         if remaining:
+            if remaining[0] == _ATTRS_NAME:
+                # Static reflection often misclassifies refinables that
+                # iommi declares as ``foo: Namespace = EvaluatedRefinable()``
+                # (e.g. ``Column.header``) as evaluated_scalar leaves —
+                # the runtime then unpacks the value into a sub-config
+                # (HeaderColumnConfig) whose ``attrs`` is the universal
+                # html_attrs namespace. Recurse rather than reject.
+                return _step(
+                    graph, _synthetic_html_attrs(), chain, j + 1,
+                    parent_class=parent_class,
+                )
             return Problem(
                 outcome="trailing_segments_after_leaf",
                 bad_segment=remaining[0],

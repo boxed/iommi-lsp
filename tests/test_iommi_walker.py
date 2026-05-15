@@ -341,3 +341,74 @@ def test_traditional_non_attrs_init_member_still_a_leaf(graph_with_traditional_a
                ["cell", "tag", "extra"])
     assert isinstance(res, Problem)
     assert res.outcome == "trailing_segments_after_leaf"
+
+
+# ---------------------------------------------------------------------------
+# `attrs` after a misclassified scalar/evaluated_scalar refinable. Iommi
+# declares things like ``header: Namespace = EvaluatedRefinable()``; static
+# reflection collapses this to ``evaluated_scalar`` and the walker would
+# otherwise reject the canonical ``header__attrs__class__numeric=True``
+# usage. ``attrs`` is iommi's universal escape hatch, so we recurse into
+# html_attrs regardless of how the parent refinable was classified.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def graph_misclassified_scalar_with_attrs() -> IommiGraph:
+    """Column.header looks like an evaluated_scalar leaf in the graph, but
+    iommi actually unpacks it into a ``HeaderColumnConfig`` with its own
+    ``attrs`` namespace."""
+    column = IommiClass(
+        qualname="x.Column",
+        bases=[],
+        refinables={
+            "header": _r("header", "evaluated_scalar"),
+            "superheader": _r("superheader", "scalar"),
+        },
+    )
+    return IommiGraph(classes={c.qualname: c for c in [column]})
+
+
+def test_attrs_after_evaluated_scalar_treated_as_html_attrs(
+    graph_misclassified_scalar_with_attrs,
+):
+    # Column(header__attrs__class__numeric=True) — the user's canonical
+    # idiom. Must not warn.
+    assert walk(graph_misclassified_scalar_with_attrs, "x.Column",
+                ["header", "attrs", "class", "numeric"]) is OK
+
+
+def test_attrs_after_scalar_treated_as_html_attrs(
+    graph_misclassified_scalar_with_attrs,
+):
+    assert walk(graph_misclassified_scalar_with_attrs, "x.Column",
+                ["superheader", "attrs", "class", "bold"]) is OK
+
+
+def test_attrs_after_scalar_style_subspecial_ok(
+    graph_misclassified_scalar_with_attrs,
+):
+    assert walk(graph_misclassified_scalar_with_attrs, "x.Column",
+                ["header", "attrs", "style", "color"]) is OK
+
+
+def test_attrs_after_scalar_chain_past_class_value_still_fails(
+    graph_misclassified_scalar_with_attrs,
+):
+    # The html_attrs leaf rules still apply once we recurse.
+    res = walk(graph_misclassified_scalar_with_attrs, "x.Column",
+               ["header", "attrs", "class", "numeric", "deeper"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "trailing_segments_after_leaf"
+
+
+def test_non_attrs_chain_past_scalar_still_fails(
+    graph_misclassified_scalar_with_attrs,
+):
+    # Only ``attrs`` gets the recursion; an unrelated segment past a scalar
+    # leaf is still a real chain error.
+    res = walk(graph_misclassified_scalar_with_attrs, "x.Column",
+               ["header", "bogus"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "trailing_segments_after_leaf"
+    assert res.bad_segment == "bogus"

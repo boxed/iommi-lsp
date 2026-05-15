@@ -141,6 +141,98 @@ def test_workspace_model_shadows_builtin(tmp_path: Path):
     assert "extra" in info.fields
 
 
+def test_foreign_key_subclass_treated_as_foreign_key(tmp_path: Path):
+    # A subclass of ForeignKey must be recognised as a ForeignKey by the
+    # index so reverse relations / `<name>_id` accessors are still computed.
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "fields.py").write_text(
+        "from django.db import models\n"
+        "class MyForeignKey(models.ForeignKey):\n"
+        "    pass\n"
+    )
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "from shop.fields import MyForeignKey\n"
+        "class Category(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Product(models.Model):\n"
+        "    category = MyForeignKey(Category, on_delete=models.CASCADE)\n"
+    )
+    idx = build_index(tmp_path)
+    product = idx.models["shop.models.Product"]
+    assert product.fields["category"].field_type == "ForeignKey"
+    assert product.fields["category"].target == "shop.models.Category"
+    # FK-id accessor is injected.
+    assert "category_id" in product.fk_id_accessors
+    # Reverse relation registered on Category (`product_set`).
+    assert "product_set" in idx.reverse_relations["shop.models.Category"]
+
+
+def test_one_to_one_subclass_treated_as_one_to_one(tmp_path: Path):
+    (tmp_path / "acc").mkdir()
+    (tmp_path / "acc" / "__init__.py").write_text("")
+    (tmp_path / "acc" / "models.py").write_text(
+        "from django.db import models\n"
+        "class MyOneToOne(models.OneToOneField):\n"
+        "    pass\n"
+        "class User(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Profile(models.Model):\n"
+        "    user = MyOneToOne(User, on_delete=models.CASCADE)\n"
+    )
+    idx = build_index(tmp_path)
+    profile = idx.models["acc.models.Profile"]
+    assert profile.fields["user"].field_type == "OneToOneField"
+    # OneToOne is FK-like: `user_id` accessor must exist.
+    assert "user_id" in profile.fk_id_accessors
+    # Reverse relation registered on User.
+    assert "profile_set" in idx.reverse_relations["acc.models.User"]
+
+
+def test_many_to_many_subclass_treated_as_many_to_many(tmp_path: Path):
+    (tmp_path / "blog").mkdir()
+    (tmp_path / "blog" / "__init__.py").write_text("")
+    (tmp_path / "blog" / "models.py").write_text(
+        "from django.db import models\n"
+        "class MyM2M(models.ManyToManyField):\n"
+        "    pass\n"
+        "class Tag(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Post(models.Model):\n"
+        "    tags = MyM2M(Tag, related_name='posts')\n"
+    )
+    idx = build_index(tmp_path)
+    post = idx.models["blog.models.Post"]
+    assert post.fields["tags"].field_type == "ManyToManyField"
+    # M2M does NOT inject `_id` accessors.
+    assert "tags_id" not in post.fk_id_accessors
+    # Reverse relation honoured explicit `related_name`.
+    assert "posts" in idx.reverse_relations["blog.models.Tag"]
+
+
+def test_transitive_subclass_of_relation_field(tmp_path: Path):
+    # MyFK -> BaseFK -> ForeignKey: still treated as ForeignKey.
+    (tmp_path / "myapp").mkdir()
+    (tmp_path / "myapp" / "__init__.py").write_text("")
+    (tmp_path / "myapp" / "models.py").write_text(
+        "from django.db import models\n"
+        "class BaseFK(models.ForeignKey):\n"
+        "    pass\n"
+        "class MyFK(BaseFK):\n"
+        "    pass\n"
+        "class Owner(models.Model):\n"
+        "    name = models.CharField(max_length=50)\n"
+        "class Pet(models.Model):\n"
+        "    owner = MyFK(Owner, on_delete=models.CASCADE)\n"
+    )
+    idx = build_index(tmp_path)
+    pet = idx.models["myapp.models.Pet"]
+    assert pet.fields["owner"].field_type == "ForeignKey"
+    assert "owner_id" in pet.fk_id_accessors
+    assert "pet_set" in idx.reverse_relations["myapp.models.Owner"]
+
+
 def test_summary_renders_without_error():
     idx = build_index(CORPUS / "related_names")
     out = idx.summary()
