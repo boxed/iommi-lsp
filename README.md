@@ -23,10 +23,67 @@ A Django and iommi language server that proxies to
   against the workspace model index. Covers `.filter(...)` /
   `.exclude(...)` / `.get(...)` and friends, `order_by` / `values` /
   `values_list` / `only` / `defer` / `distinct` / `select_related` /
-  `prefetch_related` strings, `Q(...)` / `F('...')` expressions —
-  full `__`-traversal through relations and reverse relations.
+  `prefetch_related` strings, `Q(...)` / `F('...')` expressions,
+  `Count` / `Sum` / `Avg` / `Min` / `Max` / `OuterRef` / `Subquery`
+  string args inside `annotate(...)` / `aggregate(...)`,
+  `Prefetch('rel', queryset=...)` calls, and the
+  `get_object_or_404(Model, name=...)` / `get_list_or_404(...)`
+  shortcuts — full `__`-traversal through relations and reverse
+  relations.
 
   ![](docs/screenshots/out/orm-diagnostic.png)
+
+* **URL-name awareness.** A workspace index of `urls.py` files
+  collects every `name='…'` from `path()` / `re_path()` / `url()`,
+  honours `include(...)` namespaces (and `app_name = '…'`), and feeds:
+  completion inside `reverse('‸')` / `reverse_lazy('‸')` /
+  `redirect('‸')` / `resolve_url('‸')`, plus
+  `django-unknown-url-name` diagnostics for typos.
+
+  ![](docs/screenshots/out/url-completion.png)
+
+* **Admin field validation.** Inside `class FooAdmin(admin.ModelAdmin):`
+  (registered via `@admin.register(MyModel)` or `admin.site.register(MyModel, FooAdmin)`),
+  the entries of `list_display`, `list_filter`, `search_fields`,
+  `readonly_fields`, `ordering`, `autocomplete_fields`, `fields`,
+  `exclude`, `fieldsets` (nested `'fields'` key), and
+  `prepopulated_fields` are checked against the model — `'eemail'`
+  flags as `django-unknown-admin-field`, and completion offers the
+  real field names. Sigils (`-` for ordering, `=` / `^` / `@` for
+  search_fields) are handled transparently.
+
+  ![](docs/screenshots/out/admin-completion.png)
+
+* **ModelForm / Form awareness.** `Meta.fields` / `Meta.exclude` are
+  validated against the bound model; `clean_<field>` methods on
+  `Form` / `ModelForm` subclasses fire `django-unknown-clean-method`
+  when `<field>` isn't a declared form field; completion fires inside
+  `self.fields['‸']` / `self.cleaned_data['‸']`.
+
+  ![](docs/screenshots/out/forms-completion.png)
+
+* **Class-based view attributes.** `model = Foo` binds the CBV; then
+  `fields = ['‸']` (UpdateView/CreateView), `ordering = ['-‸']`
+  (ListView), and `slug_field = '‸'` (DetailView) all complete and
+  validate against `Foo`.
+
+  ![](docs/screenshots/out/views-completion.png)
+
+* **Migration dependencies.** `dependencies = [('app', '‸')]` in a
+  `Migration` subclass offers the matching `<app>/migrations/`
+  filenames.
+
+* **Signal sender completion.** `@receiver(post_save, sender=‸)` and
+  `signal.connect(handler, sender=‸)` surface workspace model
+  classes; the first positional of `@receiver(...)` and `signal=`
+  kwargs suggest known signal names (`post_save`, `pre_delete`, …).
+
+  ![](docs/screenshots/out/signal-completion.png)
+
+* **Staticfiles completion.** Typing inside `static('‸')` offers
+  every file under any `static/` directory in the project.
+
+  ![](docs/screenshots/out/static-completion.png)
 
 * **Template-name completion in any `/`-containing string.** Once the
   workspace is indexed, typing `'myapp/‸'` (where `‸` is the cursor)
@@ -49,9 +106,11 @@ A Django and iommi language server that proxies to
 * **No more `Item.objects` false positives.** ty's
   `unresolved-attribute` diagnostics on Django metaclass magic
   (`objects`, `_meta`, `pk`/`id`, `<fk>_id`, reverse relations,
-  `DoesNotExist`, `MultipleObjectsReturned`, …) are dropped before they
-  reach the editor. Real
-  bugs survive.
+  `DoesNotExist`, `MultipleObjectsReturned`,
+  `get_<field>_display()` for fields with `choices=`,
+  `get_next_by_<field>()` / `get_previous_by_<field>()` on date
+  fields, …) are dropped before they reach the editor. Real bugs
+  survive.
 * **No more `` `request` is unused `` nags on views.** Django view
   functions take `request` whether they read it or not — ty's hint is
   dropped when `request` is the first parameter (or first after
@@ -80,9 +139,16 @@ A Django and iommi language server that proxies to
   suggests `User`'s fields (insert as `username__`, `email__`, …
   so you can keep configuring the auto-generated column). The same
   works inside `auto__include=['‸']` / `auto__exclude=['‸']` string
-  literals.
+  literals, and also against top-level `model=` / `rows=` /
+  `instance=` kwargs so `Table(rows=User.objects.all(), columns__‸)`
+  works without `auto__`.
 
   ![](docs/screenshots/out/iommi-auto-model.png)
+
+* **Style completion.** `Table(style='‸')` / `Form(style='‸')`
+  offers iommi's built-in style names (`bootstrap`, `bootstrap5`,
+  `bulma`, `water`, …). Non-exclusive so custom-registered styles
+  still come through ty.
 
 * **`iommi-unknown-refinable` diagnostics.** Invalid chains in
   `Class(kw__chain=...)` calls flag the first dead-end segment.
@@ -212,9 +278,9 @@ manager = ["mongo", "search"]            # treat these as Manager-like attrs
 ```
 
 Recognised rule groups: `manager`, `meta`, `pk`, `exception`, `fk_id`,
-`reverse`, `orm_lookup`, `unused_request_param`. Unknown groups in
-`disabled_rules` are ignored with a stderr warning rather than silently
-breaking the filter.
+`reverse`, `generated`, `orm_lookup`, `unused_request_param`. Unknown
+groups in `disabled_rules` are ignored with a stderr warning rather
+than silently breaking the filter.
 
 A missing or malformed `pyproject.toml` falls back to defaults; the
 proxy never crashes on a bad config.

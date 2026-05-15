@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -181,6 +182,46 @@ class DiagnosticInterceptor:
         return out
 
 
+def _count_items(result: Any) -> int:
+    items = _items_of_result(result)
+    return len(items) if items is not None else 0
+
+
+def _log_completion_timing(
+    source: str,
+    msg_id: Any,
+    uri: str,
+    position: dict,
+    start: float,
+    item_count: int,
+) -> None:
+    """Log how long a completion round-trip took.
+
+    *source* is ``"ty"`` (request went to the backend and came back),
+    ``"ty+augmented"`` (came back from ty and we mixed in analyzer
+    items), or ``"synthetic"`` (we never asked ty — short-circuit).
+
+    Emits at INFO when the elapsed time is over the perceptibility
+    threshold (anything users notice as "popup feels slow") and at
+    DEBUG otherwise — so a normal editing session doesn't spam the log
+    while a slow one still surfaces in the editor's LSP log panel
+    without raising the log level.
+    """
+    elapsed_ms = (time.perf_counter() - start) * 1000.0
+    line = position.get("line")
+    character = position.get("character")
+    tail = uri.rsplit("/", 1)[-1]
+    msg = (
+        f"completion {source} id={msg_id} uri=…/{tail} "
+        f"line={line} char={character} items={item_count} "
+        f"elapsed={elapsed_ms:.0f}ms"
+    )
+    if elapsed_ms >= 100:
+        _log.info(msg)
+    else:
+        _log.debug(msg)
+
+
 def _items_of_result(result: Any) -> list | None:
     """Return the mutable item list inside a completion *result*, or None.
 
@@ -287,6 +328,11 @@ class CompletionMatchmaker:
         self.analyzers: list[Analyzer] = list(analyzers)
         self._text_provider = text_provider
         self._pending: dict[Any, tuple[str, dict]] = {}
+        # Per-request start times, used to log completion round-trip
+        # latency in :meth:`on_response`. Keyed by message id; entries
+        # are popped when the matching response arrives (or when the
+        # request is cancelled).
+        self._started_at: dict[Any, float] = {}
         self._pending_initialize: set[Any] = set()
         # Ids the editor told us to cancel before ty's response arrived.
         # We bound the set so a misbehaving client can't grow it unboundedly
@@ -324,6 +370,7 @@ class CompletionMatchmaker:
             cancel_id = (payload.get("params") or {}).get("id")
             if cancel_id is not None and cancel_id in self._pending:
                 self._pending.pop(cancel_id, None)
+                self._started_at.pop(cancel_id, None)
                 if len(self._cancelled) >= self._cancelled_cap:
                     # Drop the oldest entry — set order is insertion order
                     # in CPython, so this is the one that's been waiting
@@ -346,6 +393,8 @@ class CompletionMatchmaker:
         position = params.get("position")
         if not (isinstance(uri, str) and isinstance(position, dict)):
             return body
+
+        start = time.perf_counter()
 
         # Short-circuit known-exclusive positions: when an analyzer
         # claims a position outright (Django ORM kwarg, INSTALLED_APPS,
@@ -375,8 +424,13 @@ class CompletionMatchmaker:
                 except Exception:
                     _log.exception("synthetic completion write failed; falling back")
                 else:
+                    _log_completion_timing(
+                        "synthetic", msg_id, uri, position,
+                        start, len(items),
+                    )
                     return None   # don't forward to ty; we've already responded
         self._pending[msg_id] = (uri, position)
+        self._started_at[msg_id] = start
         return body
 
     async def on_response(self, body: bytes) -> bytes | None:
@@ -398,6 +452,7 @@ class CompletionMatchmaker:
             # moved on.
             self._cancelled.discard(msg_id)
             self._pending.pop(msg_id, None)
+            self._started_at.pop(msg_id, None)
             return body
         if msg_id in self._pending_initialize:
             self._pending_initialize.discard(msg_id)
@@ -406,6 +461,7 @@ class CompletionMatchmaker:
         if context is None:
             return body
         uri, position = context
+        start = self._started_at.pop(msg_id, None)
         extras, exclusive, incomplete = self._gather(uri, position)
         partial = self._partial_at(uri, position)
 
@@ -422,6 +478,11 @@ class CompletionMatchmaker:
         # locally instead of round-tripping every keystroke.
         will_repack = self._text_provider is not None
         if not merged and not will_repack:
+            if start is not None:
+                _log_completion_timing(
+                    "ty", msg_id, uri, position, start,
+                    _count_items(payload.get("result")),
+                )
             return body   # zero-copy: nothing for us to do here
 
         original_result = payload.get("result")
@@ -459,15 +520,40 @@ class CompletionMatchmaker:
                 _annotate_sort_text(items, partial)
             result = payload.get("result")
             if isinstance(result, dict):
-                # Only force re-request when re-querying is actually
-                # required — either because we're augmenting ty's items
-                # (so our prefix-priority sort needs the latest partial)
-                # or because at least one contributing analyzer says its
-                # items depend on context that the editor's local filter
-                # can't reproduce (e.g. iommi ``__`` chain crossings).
-                result["isIncomplete"] = not (exclusive and not incomplete)
+                if merged:
+                    # Our analyzer items are filtered by the live partial,
+                    # so the editor needs to re-query as the user keeps
+                    # typing — unless an exclusive analyzer explicitly
+                    # opted into a complete response (e.g. the URL name
+                    # list, where the candidate set doesn't change with
+                    # further keystrokes).
+                    result["isIncomplete"] = not (exclusive and not incomplete)
+                else:
+                    # ty alone. At a Python identifier position the visible
+                    # namespace is fixed for the duration of a typing run —
+                    # typing more letters can only narrow the candidate
+                    # set, never widen it. Telling the editor
+                    # ``isIncomplete: true`` (which ty often does
+                    # conservatively) forces a fresh round-trip on every
+                    # keystroke; in a workspace where ty's completion
+                    # takes 2–4 s, that turns a 6-letter word into 12–24 s
+                    # of dead time. Override to ``false`` so the editor
+                    # caches the list and filters locally as the user
+                    # types. Our prefix-priority ``sortText`` is already
+                    # annotated, so the matching items stay on top of
+                    # the editor-side filter. If the user genuinely needs
+                    # to see items they typed past, ctrl-space (or its
+                    # editor-specific equivalent) forces a re-query.
+                    result["isIncomplete"] = False
 
-        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        repacked = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        if start is not None:
+            _log_completion_timing(
+                "ty+augmented" if exclusive else "ty",
+                msg_id, uri, position, start,
+                _count_items(payload.get("result")),
+            )
+        return repacked
 
     def _partial_at(self, uri: str, position: dict) -> str:
         if self._text_provider is None:

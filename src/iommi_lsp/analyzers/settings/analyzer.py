@@ -209,6 +209,15 @@ class SettingsAnalyzer:
         path = _uri_to_path(uri)
         if path is None:
             return empty
+        # Cheap filename gate: the heavy lifting below ast.parses the
+        # whole buffer to find the enclosing assignment, which is ~15 ms
+        # on a 1k-line file. None of the settings we recognise are
+        # assigned outside a settings module, so files whose path
+        # doesn't carry the word "settings" anywhere (covers
+        # ``settings.py``, ``prod_settings.py``, ``settings/prod.py``,
+        # ``config/settings/dev.py``, …) can bail out before parsing.
+        if not _looks_like_settings_path(path):
+            return empty
         source = self._source_for(uri, path)
         if source is None:
             return empty
@@ -647,6 +656,29 @@ def _uri_to_path(uri: str) -> Path | None:
         return None
     parsed = urlparse(uri)
     return Path(unquote(parsed.path))
+
+
+def _looks_like_settings_path(path: Path) -> bool:
+    """True when *path* is plausibly a Django settings module.
+
+    The patterns we want to match are conventional rather than enforced
+    by Django itself:
+
+    * top-level ``settings.py``;
+    * ``settings/prod.py``, ``settings/dev.py``, etc — split-settings;
+    * ``prod_settings.py``, ``settings_local.py`` — prefix/suffix variants;
+    * ``config/settings/...``, ``myproject/settings.py`` — anywhere in the path.
+
+    The check is a substring match on each path component so it's robust
+    across all of these. False positives (e.g. a hypothetical
+    ``settings_helpers.py`` that doesn't actually assign Django settings)
+    just pay the same parse cost they did before the gate existed —
+    correctness is unchanged, only latency is.
+    """
+    for part in path.parts:
+        if "settings" in part.lower():
+            return True
+    return False
 
 
 def _lsp_character_in_line(text: str, line_start: int, target_offset: int) -> int:

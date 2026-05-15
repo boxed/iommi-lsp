@@ -27,7 +27,7 @@ from pathlib import Path
 
 from ... import log
 from .builtins import BUILTIN_MODULES
-from .magic import FK_LIKE_FIELD_NAMES, RELATION_FIELD_NAMES
+from .magic import DATE_FIELD_NAMES, FK_LIKE_FIELD_NAMES, RELATION_FIELD_NAMES
 
 
 _log = log.get("django.index")
@@ -40,6 +40,7 @@ class FieldInfo:
     target: str | None = None  # for relation fields: raw target ref
     related_name: str | None = None
     is_pk: bool = False        # explicit primary_key=True
+    has_choices: bool = False  # any `choices=` kwarg present → get_FOO_display method
 
 
 @dataclass
@@ -70,6 +71,28 @@ class ModelInfo:
     @property
     def field_names(self) -> set[str]:
         return set(self.fields.keys())
+
+    @property
+    def generated_method_names(self) -> set[str]:
+        """Names of methods Django generates for this model.
+
+        * ``get_<field>_display`` for every field declared with
+          ``choices=`` — abstract bases included (they're propagated
+          into concrete subclasses by :func:`_propagate_inherited_fields`).
+        * ``get_next_by_<field>`` / ``get_previous_by_<field>`` for every
+          date/datetime field declared on a concrete model.
+
+        Returned without parentheses — callers compare against attribute
+        names from diagnostics, which never carry the call suffix.
+        """
+        out: set[str] = set()
+        for f in self.fields.values():
+            if f.has_choices:
+                out.add(f"get_{f.name}_display")
+            if f.field_type in DATE_FIELD_NAMES:
+                out.add(f"get_next_by_{f.name}")
+                out.add(f"get_previous_by_{f.name}")
+        return out
 
 
 @dataclass
@@ -458,6 +481,12 @@ def _populate_fields(
                 rn = _string_value(kw.value)
                 if rn is not None:
                     fi.related_name = rn
+            elif kw.arg == "choices":
+                # Any non-None ``choices=`` value triggers Django's
+                # ``get_<field>_display()`` method generation. We don't
+                # validate the structure — even a variable reference
+                # (``choices=STATUS_CHOICES``) is enough at runtime.
+                fi.has_choices = True
         # Resolve relation target if applicable.
         if ftype in RELATION_FIELD_NAMES and stmt.value.args:
             fi.target = _resolve_fk_target(

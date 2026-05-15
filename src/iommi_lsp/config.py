@@ -47,6 +47,7 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "exception": EXCEPTION_ATTRS,
     "fk_id": frozenset(),                  # dynamic — see ModelInfo.fk_id_accessors
     "reverse": frozenset(),                # dynamic — see DjangoIndex.reverse_relations
+    "generated": frozenset(),              # dynamic — see ModelInfo.generated_method_names
     "orm_lookup": frozenset(),             # dynamic — see DjangoAnalyzer.additional_diagnostics
     "unused_request_param": frozenset(),   # drops ty's "`request` is unused" hint when it's the first param
 }

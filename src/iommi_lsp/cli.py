@@ -21,11 +21,17 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from . import __version__, log, proxy
+from .analyzers.admin import AdminAnalyzer
 from .analyzers.django import DjangoAnalyzer, build_index
+from .analyzers.forms import FormsAnalyzer
 from .analyzers.iommi import IommiAnalyzer
 from .analyzers.iommi.build import GraphBuildError, build_for_workspace
+from .analyzers.migrations import MigrationsAnalyzer
 from .analyzers.settings import SettingsAnalyzer
+from .analyzers.signals import SignalsAnalyzer
 from .analyzers.templates import TemplateAnalyzer
+from .analyzers.urls import UrlAnalyzer
+from .analyzers.views import ViewsAnalyzer
 from .interceptor import (
     CompletionMatchmaker,
     DiagnosticInterceptor,
@@ -151,16 +157,51 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         # AUTH_USER_MODEL completion draws on workspace models.
         django_index_provider=lambda: django_analyzer.django_index,
     )
+    url_analyzer = UrlAnalyzer(
+        workspace_root=root, text_provider=documents.get,
+    )
+    admin_analyzer = AdminAnalyzer(
+        workspace_root=root,
+        text_provider=documents.get,
+        django_index_provider=lambda: django_analyzer.django_index,
+    )
+    forms_analyzer = FormsAnalyzer(
+        workspace_root=root,
+        text_provider=documents.get,
+        django_index_provider=lambda: django_analyzer.django_index,
+    )
+    views_analyzer = ViewsAnalyzer(
+        workspace_root=root,
+        text_provider=documents.get,
+        django_index_provider=lambda: django_analyzer.django_index,
+    )
+    signals_analyzer = SignalsAnalyzer(
+        workspace_root=root,
+        text_provider=documents.get,
+        django_index_provider=lambda: django_analyzer.django_index,
+    )
+    migrations_analyzer = MigrationsAnalyzer(
+        workspace_root=root, text_provider=documents.get,
+    )
     # Order matters for completion latency: ``_gather`` stops at the first
     # ``exclusive=True`` analyzer, so put the ones that are cheapest *and*
     # most likely to claim first.
-    # - settings: ~0.3 ms; bails fast outside a string literal, owns every
-    #   INSTALLED_APPS / MIDDLEWARE / … position.
+    # - urls: ~0.2 ms (no ast.parse); bails immediately when the position
+    #   isn't inside a ``reverse``-style call. Specific and very common,
+    #   so first.
     # - templates: ~0.1 ms; bails immediately when the partial has no ``/``.
-    # - iommi / django each cost ~0.7 ms because they parse the whole file
-    #   to decide whether they own the position. They go last.
+    # - settings: ~14 ms on a 1k-line buffer (it ast.parses the whole file
+    #   to figure out the enclosing assignment), so it's gated to settings-
+    #   style filenames internally — but we still place it after urls so
+    #   ``reverse('|')`` in a settings file short-circuits before settings
+    #   gets a chance to parse.
+    # - iommi / django each cost ~0.7 ms in normal files because they parse
+    #   the whole buffer to decide whether they own the position.
     analyzers = [
-        settings_analyzer, template_analyzer, iommi_analyzer, django_analyzer,
+        url_analyzer, template_analyzer, settings_analyzer,
+        admin_analyzer, forms_analyzer, views_analyzer,
+        signals_analyzer, migrations_analyzer,
+        iommi_analyzer, django_analyzer,
     ]
 
     interceptor = DiagnosticInterceptor(analyzers=analyzers)

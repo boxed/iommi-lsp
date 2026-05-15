@@ -43,6 +43,30 @@ _IOMMI_DIAG_CODE = "iommi-unknown-refinable"
 _IOMMI_DIAG_SOURCE = "iommi_lsp"
 
 
+# Built-in iommi styles. Users can register more via
+# ``register_style(...)``; we don't try to discover those at index time
+# (would require importing user code). When a style isn't in this set
+# we stay non-exclusive so custom styles aren't suppressed.
+_IOMMI_BUILTIN_STYLES: tuple[str, ...] = (
+    "base",
+    "base_enhanced_forms",
+    "bootstrap",
+    "bootstrap5",
+    "bulma",
+    "daisyui",
+    "django_admin",
+    "font_awesome_4",
+    "font_awesome_6",
+    "foundation",
+    "select2_enhanced_forms",
+    "semantic_ui",
+    "uikit",
+    "us_web_design_system",
+    "vanilla_css",
+    "water",
+)
+
+
 @dataclass
 class _ParsedFile:
     tree: ast.Module
@@ -180,6 +204,12 @@ class IommiAnalyzer:
             partial_start -= 1
         partial = source[partial_start:offset]
 
+        # Cheap precondition — iommi kwarg names can only follow ``(``
+        # or ``,``. Skips ~13 ms of buffer parse for top-level
+        # identifiers in big files.
+        if not _is_call_arg_position(source, partial_start):
+            return empty
+
         marker = "__iommi_lsp_completion_marker__"
         head = source[:partial_start]
         inserted = marker + "=None"
@@ -257,6 +287,24 @@ class IommiAnalyzer:
         # ast (line, col) back to a source offset for comparison.
         setattr(tree, "_iommi_source", patched)
 
+        # ``style='‸'`` — offer iommi's built-in style names.
+        style_target = _find_style_string(tree, ctx.start)
+        if style_target is not None:
+            items: list[dict] = []
+            for name in _IOMMI_BUILTIN_STYLES:
+                if partial and not name.startswith(partial):
+                    continue
+                items.append({
+                    "label": name,
+                    "kind": 21,
+                    "insertText": name,
+                    "detail": "iommi style",
+                    "data": {"source": "iommi_lsp.iommi-style"},
+                })
+            # Non-exclusive: users can register custom styles and we
+            # don't want to hide those from ty's name completion.
+            return CompletionResult(items=items, exclusive=False)
+
         # Find the iommi Call whose `auto__include`/`auto__exclude`
         # keyword contains a Constant string at the cursor position.
         target = _find_auto_include_string(tree, ctx.start)
@@ -317,11 +365,11 @@ class IommiAnalyzer:
         if index is None or not getattr(index, "models", None):
             return None
         for kw in call.keywords:
-            if kw.arg == "auto__model":
+            if kw.arg in ("auto__model", "model"):
                 model = _resolve_model_from_name(kw.value, index)
                 if model is not None:
                     return model
-            elif kw.arg in ("auto__rows", "auto__instance"):
+            elif kw.arg in ("auto__rows", "auto__instance", "rows", "instance"):
                 model = _resolve_model_from_manager_chain(kw.value, index)
                 if model is not None:
                     return model
@@ -764,6 +812,23 @@ def _offset_from_lsp_position(text: str, line: int, character: int) -> int:
     return offset
 
 
+def _is_call_arg_position(source: str, partial_start: int) -> bool:
+    """True if *partial_start* sits where a positional or kwarg name can
+    begin — immediately after ``(`` or ``,`` with arbitrary whitespace.
+
+    Skips the buffer ast.parse for cursors that are clearly outside any
+    call (top-level identifiers, attribute access, dict keys, etc.).
+    The single false-negative case is when the preceding token is a
+    comment, which we don't try to scan past.
+    """
+    i = partial_start - 1
+    while i >= 0 and source[i].isspace():
+        i -= 1
+    if i < 0:
+        return False
+    return source[i] in "(,"
+
+
 def _close_brackets(src: str) -> str:
     """Return the closing tokens needed to balance *src*. String-aware."""
     stack: list[str] = []
@@ -851,6 +916,28 @@ def _string_state_at(source: str, offset: int) -> _StringCtx | None:
     if in_string is None or string_start < 0:
         return None
     return _StringCtx(quote=in_string, start=string_start)
+
+
+def _find_style_string(
+    tree: ast.AST, str_start_offset: int,
+) -> tuple[ast.Call, ast.Constant] | None:
+    """Locate a string at *str_start_offset* that's the value of a
+    ``style=`` kwarg. The enclosing callee isn't checked — iommi style
+    names commonly appear on ``Style(...)``, ``Page(...)``,
+    ``Table(...)`` and friends; over-offering across non-iommi calls
+    just means an extra completion list the user can ignore.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg != "style":
+                continue
+            v = kw.value
+            if isinstance(v, ast.Constant) and isinstance(v.value, str):
+                if _node_offset_matches(v, str_start_offset, tree):
+                    return node, v
+    return None
 
 
 def _find_auto_include_string(

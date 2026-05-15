@@ -508,11 +508,13 @@ async def test_exclusive_complete_result_sets_is_incomplete_false():
 
 
 @pytest.mark.asyncio
-async def test_partial_empty_no_sort_but_forces_is_incomplete():
-    # No identifier under the cursor — no useful prefix to prioritise by,
-    # so no sortText. But we still force ``isIncomplete: true`` so the
-    # editor re-requests when the user types the next char (otherwise it
-    # would filter the cached list using its own scoring algorithm).
+async def test_ty_only_response_marked_complete():
+    # No analyzer items to merge — ty replied alone. Even if ty marked
+    # the list ``isIncomplete: true`` (its conservative default), we
+    # override to ``false`` so the editor caches and filters locally as
+    # the user keeps typing. Forces the editor to take advantage of the
+    # complete list rather than re-querying ty on each keystroke (the
+    # killer in workspaces where ty's completion is multi-second).
     m = CompletionMatchmaker(
         analyzers=[_Completer([])], text_provider=lambda uri: "    ",
     )
@@ -525,12 +527,11 @@ async def test_partial_empty_no_sort_but_forces_is_incomplete():
     }))
     resp = _frame({
         "jsonrpc": "2.0", "id": 22,
-        "result": {"items": [{"label": "foo"}, {"label": "bar"}]},
+        "result": {"isIncomplete": True, "items": [{"label": "foo"}, {"label": "bar"}]},
     })
     decoded = json.loads(await m.on_response(resp))
-    assert decoded["result"]["isIncomplete"] is True
+    assert decoded["result"]["isIncomplete"] is False
     assert [it["label"] for it in decoded["result"]["items"]] == ["foo", "bar"]
-    assert all("sortText" not in it for it in decoded["result"]["items"])
 
 
 @pytest.mark.asyncio

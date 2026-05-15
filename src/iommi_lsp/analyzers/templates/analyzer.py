@@ -51,18 +51,25 @@ class TemplateAnalyzer:
         self.workspace_root = workspace_root
         self._text_provider = text_provider
         self._templates: list[str] = []
+        self._statics: list[str] = []
 
     @property
     def templates(self) -> list[str]:
         return list(self._templates)
+
+    @property
+    def statics(self) -> list[str]:
+        return list(self._statics)
 
     # -- Analyzer protocol ----------------------------------------------------
 
     async def index(self, workspace_root: Path) -> None:
         self.workspace_root = workspace_root
         self._templates = sorted(discover_templates(workspace_root))
+        self._statics = sorted(discover_statics(workspace_root))
         _log.info(
-            "indexed %d templates under %s", len(self._templates), workspace_root,
+            "indexed %d templates, %d static files under %s",
+            len(self._templates), len(self._statics), workspace_root,
         )
 
     async def on_file_changed(self, uri: str) -> None:
@@ -78,7 +85,7 @@ class TemplateAnalyzer:
 
     def completions(self, uri: str, position: dict) -> CompletionResult:
         empty = CompletionResult()
-        if not self._templates:
+        if not self._templates and not self._statics:
             return empty
         path = _uri_to_path(uri)
         if path is None:
@@ -107,6 +114,33 @@ class TemplateAnalyzer:
             return empty
 
         partial = source[ctx.start + 1: offset]
+
+        line_start = source.rfind("\n", 0, offset) + 1
+        start_character = _lsp_character_in_line(source, line_start, ctx.start + 1)
+        edit_range = {
+            "start": {"line": line, "character": start_character},
+            "end": {"line": line, "character": character},
+        }
+
+        # ``static('foo.css')`` — staticfiles completion. Triggers
+        # without the ``/`` heuristic since the call site itself is
+        # unambiguous.
+        callee = _enclosing_callee(source, ctx.start)
+        if callee == "static" and self._statics:
+            items: list[dict] = []
+            for name in self._statics:
+                if partial and not name.startswith(partial):
+                    continue
+                items.append({
+                    "label": name,
+                    "kind": 17,   # File
+                    "insertText": name,
+                    "textEdit": {"range": edit_range, "newText": name},
+                    "detail": "static file",
+                    "data": {"source": "iommi_lsp.static-name"},
+                })
+            return CompletionResult(items=items, exclusive=True)
+
         if "/" not in partial:
             return empty
 
@@ -115,14 +149,7 @@ class TemplateAnalyzer:
         # client) from replacing only the trailing word — without it,
         # accepting ``reviews/reviews__tags.html`` on the partial
         # ``reviews/rev`` produces ``reviews/reviews/reviews__tags.html``.
-        line_start = source.rfind("\n", 0, offset) + 1
-        start_character = _lsp_character_in_line(source, line_start, ctx.start + 1)
-        edit_range = {
-            "start": {"line": line, "character": start_character},
-            "end": {"line": line, "character": character},
-        }
-
-        items: list[dict] = []
+        items = []
         for name in self._templates:
             if not name.startswith(partial):
                 continue
@@ -170,27 +197,54 @@ def discover_templates(workspace_root: Path) -> set[str]:
     directories are skipped; standard noise dirs (``.venv``, ``build``,
     …) are pruned from the search.
     """
+    return _discover_relative_files(workspace_root, "templates")
+
+
+def discover_statics(workspace_root: Path) -> set[str]:
+    """Return every static file under any ``static/`` directory."""
+    return _discover_relative_files(workspace_root, "static")
+
+
+def _discover_relative_files(workspace_root: Path, target_dirname: str) -> set[str]:
     out: set[str] = set()
     root = workspace_root.resolve()
-    templates_dirs: list[Path] = []
+    asset_dirs: list[Path] = []
     for dirpath, dirnames, _filenames in os.walk(root):
         dirnames[:] = [
             d for d in dirnames
             if d not in _SKIP_DIRS and not d.startswith(".")
         ]
-        if "templates" in dirnames:
-            templates_dirs.append(Path(dirpath) / "templates")
-            # Don't double-descend — we walk each templates dir below.
-            dirnames.remove("templates")
-    for tdir in templates_dirs:
-        for sub_dir, sub_dirnames, sub_files in os.walk(tdir):
+        if target_dirname in dirnames:
+            asset_dirs.append(Path(dirpath) / target_dirname)
+            dirnames.remove(target_dirname)
+    for adir in asset_dirs:
+        for sub_dir, sub_dirnames, sub_files in os.walk(adir):
             sub_dirnames[:] = [d for d in sub_dirnames if not d.startswith(".")]
             for name in sub_files:
                 if name.startswith("."):
                     continue
-                rel = Path(sub_dir, name).relative_to(tdir)
+                rel = Path(sub_dir, name).relative_to(adir)
                 out.add(rel.as_posix())
     return out
+
+
+def _enclosing_callee(source: str, string_start: int) -> str | None:
+    """Return the callable identifier wrapping the string at *string_start*.
+
+    Cheap left-scan: walk back over whitespace then over an identifier;
+    require an opening ``(`` between the identifier and the string.
+    """
+    i = string_start - 1
+    while i >= 0 and source[i] in " \t\r\n":
+        i -= 1
+    if i < 0 or source[i] != "(":
+        return None
+    j = i - 1
+    end = j + 1
+    while j >= 0 and (source[j].isalnum() or source[j] == "_"):
+        j -= 1
+    name = source[j + 1: end]
+    return name or None
 
 
 def _uri_to_path(uri: str) -> Path | None:

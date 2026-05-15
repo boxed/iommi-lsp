@@ -67,7 +67,19 @@ _FIELD_PATH_METHODS = frozenset({
     "select_related", "prefetch_related",
 })
 
+# Methods whose kwarg *names* are user-defined aliases (not model fields)
+# but whose *values* commonly contain ``F('path')`` / ``Count('path')``
+# expressions — so we still want to walk the call to validate those.
+_AGGREGATE_METHODS = frozenset({"annotate", "aggregate", "alias"})
+
 _MANAGER_NAMES = frozenset({"objects", "_default_manager", "_base_manager"})
+
+# Helper functions whose first positional arg is a model (class or queryset)
+# and whose kwargs are ORM lookups (like ``filter(...)``).
+# Django ships these under ``django.shortcuts``; we match by simple name.
+_HELPER_LOOKUP_FUNCS = frozenset({
+    "get_object_or_404", "get_list_or_404",
+})
 
 # Kwargs that some manager methods accept which are NOT field names
 # (e.g. `defaults={...}` to ``get_or_create``). Skipping them keeps the
@@ -366,6 +378,9 @@ class DjangoAnalyzer:
         if cfg.is_rule_enabled("reverse") and attr_name in self.django_index.reverse_attrs(model.qualname):
             return True
 
+        if cfg.is_rule_enabled("generated") and attr_name in model.generated_method_names:
+            return True
+
         return False
 
     def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:  # type: ignore[override]
@@ -490,6 +505,17 @@ class DjangoAnalyzer:
             partial_start -= 1
         partial = source[partial_start:offset]
 
+        # Cheap precondition: the only places an ORM kwarg name can sit
+        # are immediately after ``(`` or ``,`` (with whitespace allowed
+        # in between for multi-line calls). Anything else — top-level
+        # identifier, attribute access, the right-hand side of ``=``,
+        # inside a dict literal — is definitely not ours. Bailing here
+        # skips ~12 ms of buffer ast.parse on a 1k-line file. The
+        # heuristic has a false negative for kwargs preceded by a
+        # comment, which is rare enough to accept.
+        if not _is_call_arg_position(source, partial_start):
+            return empty
+
         # Patch the source so it parses: replace everything from the
         # partial onward with `<marker>=None`, then append closes to
         # balance any open brackets above the cursor. This turns an
@@ -509,13 +535,22 @@ class DjangoAnalyzer:
         marker_call = _find_marker_call(tree, marker)
         if marker_call is None:
             return empty
-        if not isinstance(marker_call.func, ast.Attribute):
-            return empty
-        method = marker_call.func.attr
-        if method not in _LOOKUP_METHODS:
+
+        model: "ModelInfo | None" = None
+        if (
+            isinstance(marker_call.func, ast.Name)
+            and marker_call.func.id in _HELPER_LOOKUP_FUNCS
+            and marker_call.args
+        ):
+            model = self._helper_first_arg_model(marker_call.args[0], tree)
+        elif isinstance(marker_call.func, ast.Attribute):
+            method = marker_call.func.attr
+            if method not in _LOOKUP_METHODS:
+                return empty
+            model = self._root_manager_model(marker_call.func.value, tree)
+        else:
             return empty
 
-        model = self._root_manager_model(marker_call.func.value, tree)
         if model is None:
             # We recognised the call shape but can't say which model —
             # don't suppress ty here, the user might know better.
@@ -618,10 +653,28 @@ class DjangoAnalyzer:
         for node in ast.walk(parsed.tree):
             if not isinstance(node, ast.Call):
                 continue
+            # ``get_object_or_404(Model, name__icontains=…)`` and friends —
+            # plain function call where the first positional is the model.
+            if isinstance(node.func, ast.Name) and node.func.id in _HELPER_LOOKUP_FUNCS:
+                if not node.args:
+                    continue
+                model = self._helper_first_arg_model(node.args[0], parsed.tree)
+                if model is None:
+                    continue
+                yield from self._validate_kwargs(parsed, model, node.keywords)
+                for arg in node.args[1:]:
+                    for q_kwargs in _iter_q_kwargs(arg):
+                        yield from self._validate_kwargs(parsed, model, q_kwargs)
+                yield from self._validate_f_calls(model, node)
+                continue
             if not isinstance(node.func, ast.Attribute):
                 continue
             method = node.func.attr
-            if method not in _LOOKUP_METHODS and method not in _FIELD_PATH_METHODS:
+            if (
+                method not in _LOOKUP_METHODS
+                and method not in _FIELD_PATH_METHODS
+                and method not in _AGGREGATE_METHODS
+            ):
                 continue
             model = self._root_manager_model(node.func.value, parsed.tree)
             if model is None:
@@ -640,6 +693,26 @@ class DjangoAnalyzer:
             # F('field__path') anywhere in the call's args/kwargs.
             yield from self._validate_f_calls(model, node)
 
+    def _helper_first_arg_model(
+        self, arg: ast.AST, tree: ast.Module,
+    ) -> ModelInfo | None:
+        """Resolve the first positional arg of a helper-lookup call to a model.
+
+        Accepts:
+        * a bare model name (``get_object_or_404(User, …)``);
+        * a module-qualified model (``get_object_or_404(myapp.models.User, …)``);
+        * a manager-rooted queryset (``get_object_or_404(User.objects, …)``)
+          or any chain of queryset methods on the same.
+        """
+        if isinstance(arg, ast.Name):
+            return self.django_index.lookup(arg.id)
+        if isinstance(arg, ast.Attribute):
+            # ``foo.bar.Model`` — match the rightmost segment.
+            return self.django_index.lookup(arg.attr)
+        # Manager chain: ``User.objects.filter(...)`` → same resolver as
+        # method-call form.
+        return self._root_manager_model(arg, tree)
+
     def _validate_field_path_args(
         self,
         parsed: _ParsedFile,
@@ -648,6 +721,26 @@ class DjangoAnalyzer:
         method: str,
     ):
         for arg in args:
+            # ``prefetch_related(Prefetch('rel', queryset=...))`` — the
+            # first positional of the Prefetch call is a field path on
+            # the receiver model.
+            if (
+                method == "prefetch_related"
+                and isinstance(arg, ast.Call)
+                and _is_prefetch_call(arg)
+                and arg.args
+            ):
+                first = arg.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    chain = lookup_walker.split_chain(first.value)
+                    result = lookup_walker.walk(
+                        self.django_index, model.qualname, chain
+                    )
+                    if isinstance(result, lookup_walker.Problem):
+                        diag = _string_problem_to_diagnostic(first, chain, 0, result)
+                        if diag is not None:
+                            yield diag
+                continue
             if not isinstance(arg, ast.Constant) or not isinstance(arg.value, str):
                 # F() / Prefetch() / variables — skip.
                 continue
@@ -866,10 +959,31 @@ def _is_f_call(call: ast.Call) -> bool:
     """Recognise ``F(...)`` and ``models.F(...)`` calls."""
     func = call.func
     if isinstance(func, ast.Name):
-        return func.id == "F"
+        return func.id in _STRING_FIELD_PATH_FUNCS
     if isinstance(func, ast.Attribute):
-        return func.attr == "F"
+        return func.attr in _STRING_FIELD_PATH_FUNCS
     return False
+
+
+def _is_prefetch_call(call: ast.Call) -> bool:
+    """Recognise ``Prefetch(...)`` and ``models.Prefetch(...)`` calls."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id == "Prefetch"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "Prefetch"
+    return False
+
+
+# Calls whose first positional argument is a Django field-path string —
+# the same shape as ``F('author__name')``. Aggregates count/sum/avg/etc.
+# accept additional ``filter=`` / ``distinct=`` kwargs after the path,
+# but we only validate the path; everything else is left to ty.
+_STRING_FIELD_PATH_FUNCS: frozenset[str] = frozenset({
+    "F",
+    "Count", "Sum", "Avg", "Min", "Max", "StdDev", "Variance",
+    "OuterRef", "Subquery",
+})
 
 
 def _iter_arg_subtrees(call: ast.Call):
@@ -1061,6 +1175,26 @@ def _offset_from_lsp_position(text: str, line: int, character: int) -> int:
         char_units += 2 if ord(ch) > 0xFFFF else 1
         offset += 1
     return offset
+
+
+def _is_call_arg_position(source: str, partial_start: int) -> bool:
+    """Cheap upper bound on whether *partial_start* sits at a fresh
+    call-argument name slot.
+
+    The only characters that can immediately precede a new positional or
+    kwarg name are ``(`` (first arg) and ``,`` (subsequent args), with
+    arbitrary whitespace in between (multi-line calls are common). If
+    the previous non-whitespace character is anything else — a newline
+    that lands on a non-call line, ``.``, ``=``, ``:``, identifier
+    chars, etc. — the cursor is definitely not at a kwarg name slot and
+    we can skip the buffer parse the heavy path would otherwise do.
+    """
+    i = partial_start - 1
+    while i >= 0 and source[i].isspace():
+        i -= 1
+    if i < 0:
+        return False
+    return source[i] in "(,"
 
 
 def _close_brackets(src: str) -> str:

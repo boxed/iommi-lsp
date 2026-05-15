@@ -48,6 +48,18 @@ FK_LIKE_FIELD_NAMES: frozenset[str] = frozenset({
 })
 
 
+# Date / time field types — declarations like these gain auto-generated
+# ``get_next_by_<name>()`` / ``get_previous_by_<name>()`` methods on the
+# concrete model. (Django adds them in :class:`ModelBase` whenever a
+# concrete model declares a non-null date/datetime field; we accept
+# nullable ones too — Django still injects the methods, they just raise
+# at runtime when there's no anchor instance.)
+DATE_FIELD_NAMES: frozenset[str] = frozenset({
+    "DateField",
+    "DateTimeField",
+})
+
+
 # Aggregate of attributes that always exist on a Django model regardless
 # of its declarations. Reverse relations and FK-id accessors are
 # index-driven and not in this set.
