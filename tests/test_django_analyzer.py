@@ -1067,6 +1067,58 @@ def test_fk_id_accessor_on_deeply_chained_queryset_is_dropped(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_fk_id_accessor_in_for_loop_over_named_queryset_is_dropped(tmp_path: Path):
+    """Real-world shape: a chained queryset is bound to a name, then a
+    ``for`` loop iterates that name. ``dp.user_id`` in the loop body
+    must resolve through both layers — first the loop target binding,
+    then the queryset variable's binding."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f():\n"
+        "    profiles = (\n"
+        "        Profile.objects.filter(bio='x')\n"
+        "        .filter(bio__isnull=False)\n"
+        "        .select_related('user')\n"
+        "    )\n"
+        "    for dp in profiles:\n"
+        "        print(dp.user_id)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 9
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_fk_id_accessor_in_comprehension_over_named_queryset_is_dropped(tmp_path: Path):
+    """Same as the for-loop case but in a comprehension's iter."""
+    src = (
+        "from myapp.models import Profile\n"
+        "\n"
+        "def f():\n"
+        "    profiles = Profile.objects.filter(bio='x').select_related('user')\n"
+        "    return [dp.user_id for dp in profiles]\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("user_id")
+    diag = _diag(line, start, start + len("user_id"), "user_id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
 def test_unknown_fk_id_on_chained_queryset_is_kept(tmp_path: Path):
     """Chain-resolved receiver still rejects a genuinely-unknown
     ``<name>_id`` accessor (no ``bogus`` FK on Profile)."""

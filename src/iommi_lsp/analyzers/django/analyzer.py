@@ -334,7 +334,7 @@ class DjangoAnalyzer:
                 continue
             for gen in node.generators:
                 if isinstance(gen.target, ast.Name) and gen.target.id == var_name:
-                    inferred = self._infer_iter_yields_model(gen.iter)
+                    inferred = self._infer_iter_yields_model(gen.iter, tree=tree)
                     if inferred is not None:
                         return inferred
 
@@ -347,23 +347,53 @@ class DjangoAnalyzer:
                     continue
                 for tgt in stmt.targets:
                     if isinstance(tgt, ast.Name) and tgt.id == var_name:
-                        inferred = self._infer_call_result_model(stmt.value)
+                        inferred = self._infer_call_result_model(stmt.value, tree=tree)
                         if inferred is not None:
                             last_match = inferred
             elif isinstance(stmt, (ast.For, ast.AsyncFor)):
                 if (stmt.lineno, stmt.col_offset) >= use_pos:
                     continue
                 if isinstance(stmt.target, ast.Name) and stmt.target.id == var_name:
-                    inferred = self._infer_iter_yields_model(stmt.iter)
+                    inferred = self._infer_iter_yields_model(stmt.iter, tree=tree)
                     if inferred is not None:
                         last_match = inferred
         return last_match
 
-    def _infer_iter_yields_model(self, value: ast.AST) -> ModelInfo | None:
+    def _assignment_value_for(
+        self, var_name: str, use_site: ast.AST, tree: ast.Module,
+    ) -> ast.AST | None:
+        """AST of the most recent assignment value to *var_name* before *use_site*."""
+        scope = _enclosing_function(tree, use_site)
+        if scope is None:
+            scope = tree
+        use_pos = (
+            getattr(use_site, "lineno", 0),
+            getattr(use_site, "col_offset", 0),
+        )
+        last: ast.AST | None = None
+        for stmt in ast.walk(scope):
+            if not isinstance(stmt, ast.Assign):
+                continue
+            if (stmt.lineno, stmt.col_offset) >= use_pos:
+                continue
+            for tgt in stmt.targets:
+                if isinstance(tgt, ast.Name) and tgt.id == var_name:
+                    last = stmt.value
+        return last
+
+    def _infer_iter_yields_model(
+        self,
+        value: ast.AST,
+        *,
+        tree: ast.Module | None = None,
+        _depth: int = 0,
+    ) -> ModelInfo | None:
         """Recognise iterables that yield Django model instances.
 
-        Covers ``Model.objects`` (bare manager) and chained queryset
-        methods like ``Model.objects.filter(...).order_by(...)``.
+        Covers ``Model.objects`` (bare manager), chained queryset methods
+        like ``Model.objects.filter(...).order_by(...)``, and a Name that
+        binds to one of those — e.g. ``qs = Model.objects.filter(...);
+        for x in qs:`` (``tree`` must be supplied for that step).
         """
         # Bare ``Model.objects`` / ``Model._default_manager`` — managers
         # are iterable and yield instances.
@@ -376,7 +406,18 @@ class DjangoAnalyzer:
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
             method = value.func.attr
             if method in _QUERY_METHODS_RETURNING_QUERYSET:
-                return self._infer_iter_yields_model(value.func.value)
+                return self._infer_iter_yields_model(
+                    value.func.value, tree=tree, _depth=_depth + 1,
+                )
+        # ``for x in NAME`` / ``[... for x in NAME]`` where NAME is itself
+        # bound to a queryset earlier in the scope. Depth-bound to avoid
+        # blowups on cyclic ``a = a`` shapes.
+        if isinstance(value, ast.Name) and tree is not None and _depth < 4:
+            bound = self._assignment_value_for(value.id, value, tree)
+            if bound is not None:
+                return self._infer_iter_yields_model(
+                    bound, tree=tree, _depth=_depth + 1,
+                )
         return None
 
     def _resolve_via_annotation(
@@ -469,7 +510,9 @@ class DjangoAnalyzer:
                     return model
         return None
 
-    def _infer_call_result_model(self, value: ast.AST) -> ModelInfo | None:
+    def _infer_call_result_model(
+        self, value: ast.AST, *, tree: ast.Module | None = None,
+    ) -> ModelInfo | None:
         """Recognise ``Model(...)`` and ``Model.objects.<chain>.<method>(...)``."""
         # ``get_user_model()`` / ``django.contrib.auth.get_user_model()`` —
         # Django's runtime AUTH_USER_MODEL resolver. We can't read the
@@ -483,12 +526,14 @@ class DjangoAnalyzer:
             return self.django_index.lookup(value.func.id)
         # ``Model.objects.<...>.<terminal>(...)`` — terminal returns an
         # instance, the prefix may include any number of queryset-returning
-        # methods (``filter``/``exclude``/``order_by``/...).
+        # methods (``filter``/``exclude``/``order_by``/...). The prefix
+        # may itself bottom out at a Name bound to a queryset — pass
+        # ``tree`` so the iter-resolver can follow that binding.
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
             method = value.func.attr
             if method not in _QUERY_METHODS_RETURNING_INSTANCE:
                 return None
-            return self._infer_iter_yields_model(value.func.value)
+            return self._infer_iter_yields_model(value.func.value, tree=tree)
         return None
 
     def _attr_is_magic(self, model: ModelInfo, attr_name: str) -> bool:
