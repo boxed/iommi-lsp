@@ -344,6 +344,32 @@ def test_pk_kept_for_explicit_pk_model(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_explicit_pk_field_name_is_suppressed(tmp_path: Path):
+    """Access on the model's actual PK field name must drop.
+
+    Django's descriptor magic means ty sometimes can't see the explicit
+    PK field. We look the name up off the index and suppress.
+    """
+    src = (
+        "from myapp.models import WithExplicitPK\n"
+        "\n"
+        "def f():\n"
+        "    return WithExplicitPK.code\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    text = src.splitlines()[line]
+    start = text.rindex("code")
+    diag = _diag(line, start, start + len("code"), "code")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
 def test_reverse_relation_is_dropped(tmp_path: Path):
     src = (
         "from blog.models import Author\n"

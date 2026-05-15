@@ -295,6 +295,40 @@ def test_fk_id_completion_on_class_attribute(analyzer_basic, tmp_path):
     assert item["kind"] == 5
 
 
+def test_pk_completion_implicit_id(analyzer_basic, tmp_path):
+    """`User.<cursor>` — implicit PK model offers `id`."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import User\nUser."
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert result.exclusive is False
+    labels = _labels(result)
+    assert "id" in labels
+    item = next(it for it in result.items if it["label"] == "id")
+    assert item["detail"] == "primary key"
+
+
+def test_pk_completion_explicit_pk_field_name(analyzer_basic, tmp_path):
+    """`WithExplicitPK.<cursor>` — explicit PK model offers its PK field name."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import WithExplicitPK\nWithExplicitPK."
+    )
+    result = analyzer_basic.completions(uri, pos)
+    labels = _labels(result)
+    assert "code" in labels
+    item = next(it for it in result.items if it["label"] == "code")
+    assert item["detail"] == "primary key"
+
+
+def test_pk_completion_partial_filters(analyzer_basic, tmp_path):
+    """Partial prefix that doesn't match the PK name suppresses the item."""
+    uri, pos = _write_with_cursor(
+        tmp_path, "from myapp.models import User\nUser.zz"
+    )
+    result = analyzer_basic.completions(uri, pos)
+    assert "id" not in _labels(result)
+
+
 def test_fk_id_completion_partial_prefix_filters(analyzer_basic, tmp_path):
     """`Profile.us<cursor>` — partial `us` matches `user_id`."""
     uri, pos = _write_with_cursor(

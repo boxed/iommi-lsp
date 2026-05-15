@@ -73,6 +73,14 @@ def test_fk_id_accessors():
     assert profile.fk_id_accessors == {"user_id"}
 
 
+def test_pk_name_implicit_and_explicit():
+    idx = build_index(CORPUS / "basic_django")
+    user = idx.models["myapp.models.User"]
+    explicit = idx.models["myapp.models.WithExplicitPK"]
+    assert user.pk_name == "id"
+    assert explicit.pk_name == "code"
+
+
 def test_abstract_base_inheritance():
     idx = build_index(CORPUS / "abstract_base")
     assert "library.models.Timestamped" in idx.models

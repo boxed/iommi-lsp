@@ -60,6 +60,18 @@ class ModelInfo:
         return not self.has_explicit_pk and not self.abstract
 
     @property
+    def pk_name(self) -> str:
+        """Name of the actual primary-key field on this model.
+
+        Returns the explicit ``primary_key=True`` field's name when the
+        model declares one, otherwise ``"id"`` (Django's default).
+        """
+        for f in self.fields.values():
+            if f.is_pk:
+                return f.name
+        return "id"
+
+    @property
     def fk_id_accessors(self) -> set[str]:
         """``<field>_id`` accessors injected by ForeignKey/OneToOneField."""
         return {

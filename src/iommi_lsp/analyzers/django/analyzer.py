@@ -423,11 +423,20 @@ class DjangoAnalyzer:
             if cfg.is_rule_enabled(group) and attr_name in cfg.merged_static_attrs(group):
                 return True
 
-        if cfg.is_rule_enabled("pk") and attr_name in cfg.merged_static_attrs("pk"):
-            # Special-case `id`: only present implicitly when no explicit PK.
-            if attr_name == "id" and not model.implicit_id:
-                return False
-            return True
+        if cfg.is_rule_enabled("pk"):
+            if attr_name in cfg.merged_static_attrs("pk"):
+                # Special-case `id`: only present implicitly when no
+                # explicit PK. With an explicit PK, the actual PK name
+                # is whatever the user declared (see below).
+                if attr_name == "id" and not model.implicit_id:
+                    return False
+                return True
+            # The model's actual PK field name — `id` for implicit PK,
+            # otherwise the field declared with ``primary_key=True``.
+            # Suppressing this means ty's "unresolved-attribute" warning
+            # for the real PK field never reaches the user.
+            if attr_name == model.pk_name:
+                return True
 
         if cfg.is_rule_enabled("fk_id") and attr_name in model.fk_id_accessors:
             return True
@@ -733,6 +742,20 @@ class DjangoAnalyzer:
                 "insertText": name,
                 "detail": "FK underlying-column accessor",
                 "data": {"source": "iommi_lsp.fk-id", "model": model.qualname},
+            })
+        # The model's actual PK name. For implicit-PK models that's ``id``
+        # — Django adds it via the metaclass and ty has no way to see it.
+        # For explicit-PK models the field is in the class body and ty
+        # already knows about it, but offering it here is harmless: ty's
+        # own completion items get merged on top.
+        pk_name = model.pk_name
+        if not partial or pk_name.startswith(partial):
+            items.append({
+                "label": pk_name,
+                "kind": 5,
+                "insertText": pk_name,
+                "detail": "primary key",
+                "data": {"source": "iommi_lsp.pk", "model": model.qualname},
             })
         return CompletionResult(items=items, exclusive=False)
 
