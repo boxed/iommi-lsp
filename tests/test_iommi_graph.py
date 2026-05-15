@@ -189,6 +189,31 @@ def test_reflector_picks_up_refinable_decorated_methods():
     assert "post_bulk_edit" in table.refinables
 
 
+def test_reflector_classifies_extra_and_extra_evaluated_as_open_namespace():
+    """``extra`` and ``extra_evaluated`` are open-ended namespaces in iommi —
+    user code can stuff arbitrary keys into them (``Form(extra__my_thing=1)``,
+    ``Table(extra_evaluated__color=lambda **_: "red")``). The reflector must
+    classify them as ``open_namespace`` everywhere they appear, otherwise
+    valid user code gets flagged as ``unknown-iommi-refinable``.
+    """
+    from iommi_lsp.analyzers.iommi.reflect import build
+
+    g = build()
+    seen = 0
+    for cls in g.classes.values():
+        for name in ("extra", "extra_evaluated"):
+            ref = cls.refinables.get(name)
+            if ref is None:
+                continue
+            seen += 1
+            assert ref.kind == "open_namespace", (
+                f"{cls.qualname}.{name} classified as {ref.kind!r}; "
+                "expected 'open_namespace'"
+            )
+    # Sanity: we actually exercised the assertion against real classes.
+    assert seen > 0
+
+
 def test_collect_init_members_handles_decorated_init():
     """Cell's ``__init__`` is wrapped by ``@dispatch``. _collect_init_members
     must unwrap so the source can still be AST-parsed.

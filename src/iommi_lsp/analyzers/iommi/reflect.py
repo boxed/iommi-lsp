@@ -146,6 +146,15 @@ def _classify(name: str, refinable_obj: Any, default_value: Any, annotation: Any
 
     rtype = type(refinable_obj).__name__
 
+    # ``extra`` and ``extra_evaluated`` are iommi's open-ended user-data
+    # buckets: any key the user wants. iommi declares them inconsistently
+    # (sometimes with a ``Meta.extra = EMPTY`` default that makes them look
+    # like an empty Namespace, sometimes without). Pin them to
+    # ``open_namespace`` so user code like ``Form(extra__my_thing=1)`` and
+    # ``Table(extra_evaluated__color=...)`` is never flagged.
+    if name in ("extra", "extra_evaluated"):
+        return Refinable(name=name, kind="open_namespace", refinable_type=rtype)
+
     if isinstance(refinable_obj, RefinableMembers):
         return Refinable(
             name=name,

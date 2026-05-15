@@ -51,8 +51,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "group": {
           "kind": "evaluated_scalar",
@@ -127,8 +131,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "in_body": {
           "kind": "scalar",
@@ -230,8 +238,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "group": {
           "kind": "evaluated_scalar",
@@ -241,6 +253,10 @@
           "kind": "class_ref",
           "refinable_type": "Refinable",
           "target": "iommi.fragment.Fragment"
+        },
+        "help_text": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "function"
         },
         "include": {
           "kind": "scalar",
@@ -267,6 +283,10 @@
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
         },
+        "is_valid": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
         "label": {
           "kind": "class_ref",
           "refinable_type": "Refinable",
@@ -289,6 +309,10 @@
           "refinable_type": "Refinable",
           "target": "iommi.fragment.Fragment"
         },
+        "parse": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
         "parse_empty_string_as_none": {
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
@@ -297,9 +321,25 @@
           "kind": "scalar",
           "refinable_type": "SpecialEvaluatedRefinable"
         },
+        "post_validation": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
         "raw_data": {
           "kind": "scalar",
           "refinable_type": "Refinable"
+        },
+        "read_from_instance": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "render_value": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "render_value_on_error": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "required": {
           "kind": "evaluated_scalar",
@@ -320,6 +360,10 @@
         "template": {
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
+        },
+        "write_to_instance": {
+          "kind": "scalar",
+          "refinable_type": "function"
         }
       }
     },
@@ -395,8 +439,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "field_group": {
           "kind": "scalar",
@@ -454,6 +502,14 @@
           "refinable_type": "Refinable",
           "target": "iommi.page.Page"
         },
+        "post_validation": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "read_nested_form_from_instance": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
         "template": {
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
@@ -462,6 +518,10 @@
           "kind": "class_ref",
           "refinable_type": "SpecialEvaluatedRefinable",
           "target": "iommi.fragment.Fragment"
+        },
+        "write_nested_form_to_instance": {
+          "kind": "scalar",
+          "refinable_type": "function"
         }
       }
     },
@@ -548,8 +608,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "include": {
           "kind": "scalar",
@@ -612,8 +676,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "include": {
           "kind": "scalar",
@@ -708,8 +776,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "group": {
           "kind": "evaluated_scalar",
@@ -782,8 +854,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "h_tag": {
           "kind": "class_ref",
@@ -881,8 +957,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "fieldset_legend": {
           "kind": "evaluated_scalar",
@@ -957,8 +1037,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "include": {
           "kind": "scalar",
@@ -1015,8 +1099,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "field": {
           "kind": "scalar",
@@ -1050,6 +1138,10 @@
           "kind": "scalar",
           "refinable_type": "Refinable"
         },
+        "parse": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
         "pk_lookup_to_q": {
           "kind": "scalar",
           "refinable_type": "Refinable"
@@ -1062,6 +1154,10 @@
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
         },
+        "query_operator_to_q_operator": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
         "search_fields": {
           "kind": "scalar",
           "refinable_type": "Refinable"
@@ -1069,6 +1165,10 @@
         "unary": {
           "kind": "scalar",
           "refinable_type": "Refinable"
+        },
+        "value_to_q": {
+          "kind": "scalar",
+          "refinable_type": "function"
         }
       }
     },
@@ -1123,8 +1223,16 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "filter": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "filters": {
           "kind": "members",
@@ -1160,6 +1268,10 @@
         "model": {
           "kind": "scalar",
           "refinable_type": "SpecialEvaluatedRefinable"
+        },
+        "postprocess": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "rows": {
           "kind": "scalar",
@@ -1267,12 +1379,16 @@
           "target": "iommi.table.Cell"
         },
         "extra": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "iommi_style": {
           "kind": "scalar",
@@ -1338,6 +1454,10 @@
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
         },
+        "display_name": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "function"
+        },
         "endpoints": {
           "kind": "members",
           "refinable_type": "RefinableMembers"
@@ -1347,8 +1467,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "filter": {
           "kind": "open_namespace",
@@ -1394,6 +1518,10 @@
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
         },
+        "sort_key": {
+          "kind": "evaluated_scalar",
+          "refinable_type": "function"
+        },
         "sortable": {
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
@@ -1428,11 +1556,11 @@
           }
         },
         "extra": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
         },
         "layout": {
@@ -1498,8 +1626,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "include": {
           "kind": "scalar",
@@ -1630,8 +1762,12 @@
           "refinable_type": "Refinable"
         },
         "extra_evaluated": {
-          "kind": "scalar",
+          "kind": "open_namespace",
           "refinable_type": "Refinable"
+        },
+        "extra_params": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "form_class": {
           "kind": "class_ref",
@@ -1686,6 +1822,18 @@
           "kind": "members",
           "refinable_type": "RefinableMembers"
         },
+        "post_bulk_edit": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "preprocess_row": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
+        "preprocess_rows": {
+          "kind": "scalar",
+          "refinable_type": "function"
+        },
         "query": {
           "kind": "open_namespace",
           "refinable_type": "Refinable"
@@ -1716,6 +1864,10 @@
         "sortable": {
           "kind": "evaluated_scalar",
           "refinable_type": "EvaluatedRefinable"
+        },
+        "sorter": {
+          "kind": "scalar",
+          "refinable_type": "function"
         },
         "superheader": {
           "kind": "scalar",
