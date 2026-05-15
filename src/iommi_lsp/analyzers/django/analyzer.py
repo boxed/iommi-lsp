@@ -188,12 +188,16 @@ class DjangoAnalyzer:
         # Narrow fallback for instance-only Django magic on annotated
         # receivers: ty knows the receiver's type from an annotation
         # (parameter, ``self`` in a model method, annotated assignment)
-        # but our flow-based resolver doesn't follow annotations. Two
+        # but our flow-based resolver doesn't follow annotations. A few
         # kinds of attr are safe to suppress this way — the names are
         # registered in the index, so genuine typos still leak through:
         #   * ``<field>_id`` underlying-column accessors on FK fields;
         #   * reverse-relation accessors (``<lower>_set`` default and
-        #     explicit ``related_name=``).
+        #     explicit ``related_name=``);
+        #   * ``pk`` and the model's actual primary-key field name —
+        #     Django adds ``pk`` to every instance regardless of the
+        #     declared PK field's name, and descriptor magic can hide
+        #     the real PK field from ty too.
         if (
             attr_name.endswith("_id")
             and self.config.is_rule_enabled("fk_id")
@@ -209,6 +213,16 @@ class DjangoAnalyzer:
                 and attr_name in self.django_index.reverse_attrs(ann_model.qualname)
             ):
                 return True
+
+        if self.config.is_rule_enabled("pk"):
+            ann_model = self._resolve_via_annotation(receiver, parsed.tree)
+            if ann_model is not None:
+                # ``pk`` exists on every model instance regardless of the
+                # declared PK name; ``ann_model.pk_name`` is ``id`` for
+                # implicit-PK models or the explicit ``primary_key=True``
+                # field's name otherwise.
+                if attr_name == "pk" or attr_name == ann_model.pk_name:
+                    return True
 
         # ``<m2m>.through`` — Django attaches ``through`` to every
         # ManyToManyField descriptor. ty can't see it without runtime

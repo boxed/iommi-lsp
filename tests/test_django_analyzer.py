@@ -370,6 +370,145 @@ def test_explicit_pk_field_name_is_suppressed(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_pk_on_annotated_param_is_dropped(tmp_path: Path):
+    """``def f(u: User): u.pk`` — receiver type comes from the annotation.
+
+    Django adds ``.pk`` to every model instance, but the flow-based
+    resolver doesn't follow annotations. The annotation fallback must
+    suppress this.
+    """
+    src = (
+        "from myapp.models import User\n"
+        "\n"
+        "def f(u: User):\n"
+        "    return u.pk\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].rindex("pk")
+    diag = _diag(line, start, start + 2, "pk")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_pk_on_explicit_pk_annotated_param_is_dropped(tmp_path: Path):
+    """``.pk`` still works on an instance of an explicit-PK model."""
+    src = (
+        "from myapp.models import WithExplicitPK\n"
+        "\n"
+        "def f(x: WithExplicitPK):\n"
+        "    return x.pk\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].rindex("pk")
+    diag = _diag(line, start, start + 2, "pk")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_pk_on_self_in_model_method_is_dropped(tmp_path: Path):
+    """``self.pk`` inside a model method (explicit-PK model)."""
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class WithExplicitPK(models.Model):\n"
+        "    code = models.CharField(max_length=10, primary_key=True)\n"
+        "\n"
+        "    def f(self):\n"
+        "        return self.pk\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 6
+    start = src.splitlines()[line].rindex("pk")
+    diag = _diag(line, start, start + 2, "pk")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_pk_on_annotated_assignment_is_dropped(tmp_path: Path):
+    """``u: User = ...; u.pk`` — annotated-assignment receiver."""
+    src = (
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    u: User = get_user()\n"
+        "    return u.pk\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].rindex("pk")
+    diag = _diag(line, start, start + 2, "pk")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_explicit_pk_field_name_on_annotated_param_is_dropped(tmp_path: Path):
+    """The actual PK field name is also suppressed on an annotated
+    instance receiver — Django's descriptor magic can hide it from ty.
+    """
+    src = (
+        "from myapp.models import WithExplicitPK\n"
+        "\n"
+        "def f(x: WithExplicitPK):\n"
+        "    return x.code\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].rindex("code")
+    diag = _diag(line, start, start + len("code"), "code")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_id_on_explicit_pk_annotated_param_is_kept(tmp_path: Path):
+    """``.id`` on an explicit-PK instance is a real bug — Django does
+    not inject ``id`` when the model declares ``primary_key=True``
+    elsewhere."""
+    src = (
+        "from myapp.models import WithExplicitPK\n"
+        "\n"
+        "def f(x: WithExplicitPK):\n"
+        "    return x.id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].rindex("id")
+    diag = _diag(line, start, start + 2, "id")
+
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
 def test_dict_comprehension_target_resolves_receiver(tmp_path: Path):
     """``{u.id: u for u in User.objects.all()}`` — comprehension target.
 
