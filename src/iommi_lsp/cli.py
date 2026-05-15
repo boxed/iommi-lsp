@@ -148,17 +148,21 @@ def _run_proxy(ty_command_str: str | None, workspace: Path | None) -> int:
         # completions when the call carries ``auto__model=Model``.
         django_index_provider=lambda: django_analyzer.django_index,
     )
-    template_analyzer = TemplateAnalyzer(
+    url_analyzer = UrlAnalyzer(
         workspace_root=root, text_provider=documents.get,
+    )
+    template_analyzer = TemplateAnalyzer(
+        workspace_root=root,
+        text_provider=documents.get,
+        # ``{% url %}`` completion + diagnostics in HTML templates draw
+        # on the workspace URL index.
+        url_index_provider=lambda: url_analyzer.url_index,
     )
     settings_analyzer = SettingsAnalyzer(
         workspace_root=root,
         text_provider=documents.get,
         # AUTH_USER_MODEL completion draws on workspace models.
         django_index_provider=lambda: django_analyzer.django_index,
-    )
-    url_analyzer = UrlAnalyzer(
-        workspace_root=root, text_provider=documents.get,
     )
     admin_analyzer = AdminAnalyzer(
         workspace_root=root,

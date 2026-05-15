@@ -73,6 +73,37 @@ _ORDERING_LIST_ATTRS: frozenset[str] = frozenset({"ordering"})
 _FIELD_SCALAR_ATTRS: frozenset[str] = frozenset({"slug_field"})
 
 
+# Class attributes that Django's generic CBV mixins set as defaults
+# (``MultipleObjectMixin`` / ``SingleObjectMixin`` / ``TemplateResponseMixin``).
+# ty doesn't see these without Django stubs loaded, so accessing
+# ``self.paginate_by`` etc. in an override fires an ``unresolved-attribute``
+# diagnostic. They're real, stable Django API — suppress when the
+# enclosing class transitively inherits a generic CBV.
+_CBV_INHERITED_ATTRS: frozenset[str] = frozenset({
+    "context_object_name",
+    "paginate_by",
+    "paginator_class",
+    "page_kwarg",
+    "slug_url_kwarg",
+    "pk_url_kwarg",
+    "slug_field",
+    "template_name",
+    "template_name_suffix",
+    "template_name_field",
+    "queryset",
+    "object",
+    "object_list",
+    "form_class",
+    "success_url",
+    "initial",
+    "prefix",
+    "http_method_names",
+    "response_class",
+    "content_type",
+    "extra_context",
+})
+
+
 @dataclass
 class _ViewClass:
     cls_node: ast.ClassDef
@@ -139,7 +170,21 @@ class ViewsAnalyzer:
         return None
 
     def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:
-        return False
+        if not _is_unresolved_attribute(diagnostic):
+            return False
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        source = self._source_for(uri, path)
+        if source is None:
+            return False
+        try:
+            return _diagnostic_is_cbv_self_attr(source, diagnostic)
+        except Exception:
+            _log.exception(
+                "CBV self-attr suppression check crashed; keeping the diagnostic"
+            )
+            return False
 
     def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
         index = self._index()
@@ -192,6 +237,95 @@ class ViewsAnalyzer:
         except (OSError, UnicodeDecodeError) as e:
             _log.debug("could not read %s: %s", path, e)
             return None
+
+
+# ---------------------------------------------------------------------------
+# False-positive suppression for ``self.<inherited CBV attr>``
+# ---------------------------------------------------------------------------
+
+
+def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
+    code = diagnostic.get("code")
+    if isinstance(code, str) and code == "unresolved-attribute":
+        return True
+    if isinstance(code, dict) and code.get("value") == "unresolved-attribute":
+        return True
+    return False
+
+
+def _diagnostic_is_cbv_self_attr(source: str, diagnostic: Diagnostic) -> bool:
+    """Drop the diagnostic when it pins to ``self.<inherited CBV attr>``
+    inside a class that transitively inherits a generic CBV.
+
+    AST-only: we look for the smallest ``ast.Attribute`` whose range
+    contains the diagnostic's range, check its receiver is ``self``, its
+    attr is in :data:`_CBV_INHERITED_ATTRS`, and the enclosing class has
+    a recognised CBV base.
+    """
+    rng = diagnostic.get("range") or {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    attr = _find_attribute_at(tree, rng)
+    if attr is None:
+        return False
+    if attr.attr not in _CBV_INHERITED_ATTRS:
+        return False
+    if not (isinstance(attr.value, ast.Name) and attr.value.id == "self"):
+        return False
+    cls = _enclosing_cbv_class(tree, attr)
+    return cls is not None
+
+
+def _find_attribute_at(tree: ast.Module, rng: dict) -> ast.Attribute | None:
+    start = rng.get("start") or {}
+    end = rng.get("end") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    e_line = int(end.get("line", s_line - 1)) + 1
+    e_col = int(end.get("character", s_col))
+
+    best: ast.Attribute | None = None
+    best_size = (10**9, 10**9)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        nl = node.lineno
+        nc = node.col_offset
+        nel = node.end_lineno or nl
+        nec = node.end_col_offset or nc
+        if (nl, nc) > (s_line, s_col):
+            continue
+        if (nel, nec) < (e_line, e_col):
+            continue
+        size = (nel - nl, nec - nc)
+        if size < best_size:
+            best = node
+            best_size = size
+    return best
+
+
+def _enclosing_cbv_class(tree: ast.Module, target: ast.AST) -> ast.ClassDef | None:
+    target_line = getattr(target, "lineno", None)
+    if target_line is None:
+        return None
+    best: ast.ClassDef | None = None
+    best_span = 10**9
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if node.lineno is None or node.end_lineno is None:
+            continue
+        if not (node.lineno <= target_line <= node.end_lineno):
+            continue
+        if not any(_is_cbv_base(b) for b in node.bases):
+            continue
+        span = node.end_lineno - node.lineno
+        if span < best_span:
+            best = node
+            best_span = span
+    return best
 
 
 # ---------------------------------------------------------------------------

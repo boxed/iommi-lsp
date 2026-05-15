@@ -61,6 +61,14 @@ _MODEL_FORM_BASE_NAMES: frozenset[str] = frozenset({
 })
 
 
+# ``Meta`` dict-style attrs whose keys are model field names. The values
+# are widget classes / strings / dicts / etc. — we don't validate them;
+# only the keys.
+_META_DICT_ATTRS: frozenset[str] = frozenset({
+    "widgets", "labels", "help_texts", "error_messages", "field_classes",
+})
+
+
 @dataclass
 class _FormClass:
     cls_node: ast.ClassDef
@@ -71,6 +79,9 @@ class _FormClass:
     meta_exclude: list[ast.Constant] | None
     meta_use_all: bool                      # ``Meta.fields = '__all__'``
     methods: set[str]
+    # ``Meta.widgets`` / ``labels`` / ``help_texts`` / ``error_messages`` /
+    # ``field_classes`` — each maps attr name → list of dict-key Constants.
+    meta_dict_keys: dict[str, list[ast.Constant]] = field(default_factory=dict)
 
 
 class FormsAnalyzer:
@@ -200,6 +211,17 @@ def _string_constants_in(node: ast.AST | None) -> list[ast.Constant]:
     return out
 
 
+def _dict_string_keys(node: ast.AST | None) -> list[ast.Constant]:
+    """Return string-literal key nodes from a dict literal."""
+    if not isinstance(node, ast.Dict):
+        return []
+    out: list[ast.Constant] = []
+    for key in node.keys:
+        if isinstance(key, ast.Constant) and isinstance(key.value, str):
+            out.append(key)
+    return out
+
+
 def _form_class_info(cls_node: ast.ClassDef) -> _FormClass | None:
     if not any(_is_form_base(b) for b in cls_node.bases):
         return None
@@ -222,6 +244,7 @@ def _form_class_info(cls_node: ast.ClassDef) -> _FormClass | None:
     meta_fields: list[ast.Constant] | None = None
     meta_exclude: list[ast.Constant] | None = None
     meta_use_all = False
+    meta_dict_keys: dict[str, list[ast.Constant]] = {}
     if meta is not None:
         for stmt in meta.body:
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
@@ -240,6 +263,8 @@ def _form_class_info(cls_node: ast.ClassDef) -> _FormClass | None:
                             meta_fields = _string_constants_in(stmt.value)
                     elif t.id == "exclude":
                         meta_exclude = _string_constants_in(stmt.value)
+                    elif t.id in _META_DICT_ATTRS:
+                        meta_dict_keys[t.id] = _dict_string_keys(stmt.value)
     return _FormClass(
         cls_node=cls_node,
         is_model_form=is_model_form,
@@ -249,6 +274,7 @@ def _form_class_info(cls_node: ast.ClassDef) -> _FormClass | None:
         meta_exclude=meta_exclude,
         meta_use_all=meta_use_all,
         methods=methods,
+        meta_dict_keys=meta_dict_keys,
     )
 
 
@@ -326,6 +352,25 @@ def _scan_diagnostics(source: str, index: "DjangoIndex | None"):
                             FORM_FIELD_DIAG_CODE,
                             f"unknown form field {result.bad_segment!r} "
                             f"on {result.on_model}",
+                            result,
+                        )
+                        if diag is not None:
+                            yield diag
+
+            # 1b. Meta.widgets / labels / help_texts / error_messages /
+            # field_classes — dict keys are model field names.
+            for attr_name, keys in info.meta_dict_keys.items():
+                for const in keys:
+                    if not isinstance(const.value, str):
+                        continue
+                    chain = lookup_walker.split_chain(const.value)
+                    result = lookup_walker.walk(index, model.qualname, chain)
+                    if isinstance(result, lookup_walker.Problem):
+                        diag = _string_diag(
+                            const,
+                            FORM_FIELD_DIAG_CODE,
+                            f"unknown form field {result.bad_segment!r} "
+                            f"in Meta.{attr_name} on {result.on_model}",
                             result,
                         )
                         if diag is not None:
@@ -428,6 +473,38 @@ def _clean_method_diag(
 _MARKER = "__iommi_lsp_forms_marker__"
 
 
+def _parse_with_marker(head: str, suffix: str) -> ast.Module | None:
+    """Try patching *head* + marker + *suffix* into a parseable tree.
+
+    The straight-line `"__MARKER__"` patch covers most contexts (list /
+    tuple / set / value position / subscript). For an unclosed dict
+    literal at a key position — ``widgets = {'em`` — the marker has to
+    sit on the *key* side of a ``:`` for the AST to parse as a dict
+    (otherwise we get ``{"…MARKER…"}`` which parses as a set or a
+    mixed-content SyntaxError when there are sibling ``k: v`` pairs).
+    """
+    plain = f'"{_MARKER}"'
+    patched = head + plain + suffix
+    try:
+        return ast.parse(patched)
+    except SyntaxError:
+        pass
+
+    closes = _close_brackets(head + plain)
+    try:
+        return ast.parse(head + plain + closes)
+    except SyntaxError:
+        pass
+
+    # Dict-key form — preserves a ``{"k": v, "MARKER": None`` parse.
+    dict_form = f'"{_MARKER}": None'
+    closes_dict = _close_brackets(head + dict_form)
+    try:
+        return ast.parse(head + dict_form + closes_dict)
+    except SyntaxError:
+        return None
+
+
 def _scan_completions(
     source: str, position: dict, index: "DjangoIndex | None",
 ) -> CompletionResult:
@@ -444,16 +521,9 @@ def _scan_completions(
 
     suffix_start = _open_string_end(source, ctx, offset)
     head = source[:ctx.start]
-    inserted = f'"{_MARKER}"'
-    patched = head + inserted + source[suffix_start:]
-    try:
-        tree = ast.parse(patched)
-    except SyntaxError:
-        closes = _close_brackets(head + inserted)
-        try:
-            tree = ast.parse(head + inserted + closes)
-        except SyntaxError:
-            return empty
+    tree = _parse_with_marker(head, source[suffix_start:])
+    if tree is None:
+        return empty
 
     location = _find_marker_location(tree)
     if location is None:
@@ -492,6 +562,32 @@ def _scan_completions(
                 "textEdit": {"range": edit_range, "newText": name},
                 "detail": f"{model.qualname}",
                 "data": {"source": "iommi_lsp.forms-meta-field"},
+            })
+        return CompletionResult(items=items, exclusive=True)
+
+    if kind.startswith("meta_dict:"):
+        # Inside ``Meta.widgets`` / ``Meta.labels`` / ``Meta.help_texts`` /
+        # ``Meta.error_messages`` / ``Meta.field_classes`` dict keys —
+        # complete model field names.
+        attr_name = kind.split(":", 1)[1]
+        if not info.is_model_form or not info.meta_model:
+            return empty
+        if index is None:
+            return empty
+        model = index.lookup(info.meta_model)
+        if model is None:
+            return empty
+        items = []
+        for name in sorted(model.fields.keys()):
+            if partial and not name.startswith(partial):
+                continue
+            items.append({
+                "label": name,
+                "kind": 5,
+                "insertText": name,
+                "textEdit": {"range": edit_range, "newText": name},
+                "detail": f"{model.qualname} (Meta.{attr_name})",
+                "data": {"source": "iommi_lsp.forms-meta-dict"},
             })
         return CompletionResult(items=items, exclusive=True)
 
@@ -560,11 +656,34 @@ def _find_marker_location(
             for t in stmt.targets:
                 if not isinstance(t, ast.Name):
                     continue
-                if t.id not in {"fields", "exclude"}:
-                    continue
-                if _subtree_contains(stmt.value, marker_id):
-                    return "meta_fields", cls
+                if t.id in {"fields", "exclude"}:
+                    if _subtree_contains(stmt.value, marker_id):
+                        return "meta_fields", cls
+                elif t.id in _META_DICT_ATTRS:
+                    # Only fire for the *key* side of a dict literal —
+                    # values are widget classes / strings / dicts that the
+                    # user clearly isn't typing a field name into.
+                    if _marker_is_dict_key(stmt.value, marker_id):
+                        return f"meta_dict:{t.id}", cls
     return None
+
+
+def _marker_is_dict_key(node: ast.AST, marker_id: int) -> bool:
+    """Is the marker constant a top-level key of *node* (an ast.Dict)?
+
+    Also accepts the set-shaped fallback (``{"MARKER"}``) for the
+    unclosed-dict case where the patched source becomes a set literal.
+    """
+    if isinstance(node, ast.Set):
+        for elt in node.elts:
+            if id(elt) == marker_id:
+                return True
+    if not isinstance(node, ast.Dict):
+        return False
+    for k in node.keys:
+        if k is not None and id(k) == marker_id:
+            return True
+    return False
 
 
 def _is_self_fields_or_cleaned(node: ast.AST) -> bool:

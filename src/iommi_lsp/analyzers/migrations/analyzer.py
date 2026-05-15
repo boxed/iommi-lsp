@@ -93,7 +93,21 @@ class MigrationsAnalyzer:
         return None
 
     def is_false_positive(self, uri: str, diagnostic: Diagnostic) -> bool:
-        return False
+        if not _is_unresolved_attribute(diagnostic):
+            return False
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        source = self._source_for(uri, path)
+        if source is None:
+            return False
+        try:
+            return _is_migration_noop_attr(source, diagnostic)
+        except Exception:
+            _log.exception(
+                "migration noop suppression check crashed; keeping the diagnostic"
+            )
+            return False
 
     def additional_diagnostics(self, uri: str) -> list[Diagnostic]:
         return []
@@ -124,6 +138,72 @@ class MigrationsAnalyzer:
         except (OSError, UnicodeDecodeError) as e:
             _log.debug("could not read %s: %s", path, e)
             return None
+
+
+# ---------------------------------------------------------------------------
+# False-positive suppression for ``RunPython.noop`` / ``RunSQL.noop``
+# ---------------------------------------------------------------------------
+
+
+_NOOP_OWNERS: frozenset[str] = frozenset({"RunPython", "RunSQL"})
+
+
+def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
+    code = diagnostic.get("code")
+    if isinstance(code, str) and code == "unresolved-attribute":
+        return True
+    if isinstance(code, dict) and code.get("value") == "unresolved-attribute":
+        return True
+    return False
+
+
+def _is_migration_noop_attr(source: str, diagnostic: Diagnostic) -> bool:
+    """``RunPython.noop`` / ``RunSQL.noop`` / ``migrations.RunPython.noop``
+    — Django attaches ``noop`` as a class attribute on these operation
+    classes. ty can't see it without runtime stubs; drop the warning.
+    """
+    rng = diagnostic.get("range") or {}
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    attr = _find_attribute_at(tree, rng)
+    if attr is None or attr.attr != "noop":
+        return False
+    receiver = attr.value
+    if isinstance(receiver, ast.Name):
+        return receiver.id in _NOOP_OWNERS
+    if isinstance(receiver, ast.Attribute):
+        return receiver.attr in _NOOP_OWNERS
+    return False
+
+
+def _find_attribute_at(tree: ast.Module, rng: dict) -> ast.Attribute | None:
+    start = rng.get("start") or {}
+    end = rng.get("end") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    e_line = int(end.get("line", s_line - 1)) + 1
+    e_col = int(end.get("character", s_col))
+
+    best: ast.Attribute | None = None
+    best_size = (10**9, 10**9)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        nl = node.lineno
+        nc = node.col_offset
+        nel = node.end_lineno or nl
+        nec = node.end_col_offset or nc
+        if (nl, nc) > (s_line, s_col):
+            continue
+        if (nel, nec) < (e_line, e_col):
+            continue
+        size = (nel - nl, nec - nc)
+        if size < best_size:
+            best = node
+            best_size = size
+    return best
 
 
 # ---------------------------------------------------------------------------

@@ -107,6 +107,14 @@ class DjangoIndex:
     )
     # simple-name index for fast receiver lookup (e.g. "User" -> [qualname, ...])
     by_simple_name: dict[str, list[str]] = field(default_factory=lambda: defaultdict(list))
+    # Union of method names declared on any class inheriting (transitively)
+    # from ``django.db.models.QuerySet`` or ``Manager`` in the workspace.
+    # Used to suppress ``Model.objects.<custom_method>`` false positives —
+    # ty can't see methods added by ``objects = MyQuerySet.as_manager()``
+    # without runtime stubs, so we accept any such method name as valid on
+    # any manager attribute access. Bias is toward false negatives, in
+    # line with the rest of the analyzer.
+    custom_queryset_methods: set[str] = field(default_factory=set)
 
     def add_model(self, info: ModelInfo) -> None:
         self.models[info.qualname] = info
@@ -673,7 +681,70 @@ def assemble_index(
                 continue
             index.reverse_relations[target][reverse_name] = info.qualname
 
+    # Fifth pass: workspace-wide union of custom QuerySet / Manager method
+    # names. ``objects = MyQuerySet.as_manager()`` exposes those methods on
+    # the manager — ty doesn't see them. We don't try to link a specific
+    # model to a specific QuerySet (would need flow analysis across files);
+    # the union is enough to suppress false positives, biased FN as usual.
+    index.custom_queryset_methods.update(
+        _collect_queryset_method_names(raws)
+    )
+
     return index
+
+
+_QUERYSET_BASES = frozenset({
+    "django.db.models.QuerySet",
+    "django.db.models.Manager",
+    "django.db.models.manager.BaseManager",
+    "django.db.models.manager.Manager",
+})
+
+
+def _collect_queryset_method_names(raws: list[_RawClass]) -> set[str]:
+    """Methods declared on every workspace class that transitively inherits
+    from ``QuerySet`` or ``Manager``.
+
+    Builds a fixed-point classification (like :func:`_classify_models`):
+    a class is a QuerySet/Manager iff one of its resolved bases is the
+    canonical Django shape or another already-classified workspace class.
+    """
+    qualname_to_raw = {r.qualname: r for r in raws}
+    by_simple: dict[str, list[_RawClass]] = defaultdict(list)
+    for r in raws:
+        by_simple[r.name].append(r)
+
+    is_qs: dict[str, bool] = {r.qualname: False for r in raws}
+    changed = True
+    while changed:
+        changed = False
+        for r in raws:
+            if is_qs[r.qualname]:
+                continue
+            for base in r.resolved_bases:
+                if base in _QUERYSET_BASES:
+                    is_qs[r.qualname] = True
+                    changed = True
+                    break
+                if base in qualname_to_raw and is_qs.get(base):
+                    is_qs[r.qualname] = True
+                    changed = True
+                    break
+                head = base.split(".")[-1]
+                if any(is_qs.get(c.qualname) for c in by_simple.get(head, ())):
+                    is_qs[r.qualname] = True
+                    changed = True
+                    break
+
+    out: set[str] = set()
+    for r in raws:
+        if not is_qs[r.qualname]:
+            continue
+        for stmt in r.node.body:
+            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if not stmt.name.startswith("_"):
+                    out.add(stmt.name)
+    return out
 
 
 def _propagate_inherited_fields(

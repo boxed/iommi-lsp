@@ -744,3 +744,137 @@ def test_disabled_via_config(analyzer_basic: DjangoAnalyzer, tmp_path: Path):
         disabled_rules=frozenset({"orm_lookup"}),
     )
     assert analyzer_basic.additional_diagnostics(uri) == []
+
+
+# ---------------------------------------------------------------------------
+# annotate(alias=…) / aggregate(alias=…) — local aliases as valid lookups
+# ---------------------------------------------------------------------------
+
+
+def test_annotate_alias_accepted_in_chained_filter(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "(Author.objects\n"
+        "    .annotate(article_count=Count('articles'))\n"
+        "    .filter(article_count__gte=5))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert diags == []
+
+
+def test_annotate_alias_accepted_in_chained_order_by(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "(Author.objects\n"
+        "    .annotate(n=Count('articles'))\n"
+        "    .order_by('-n'))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert diags == []
+
+
+def test_aggregate_alias_accepted_in_chained_filter(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "(Author.objects\n"
+        "    .aggregate(total=Count('articles'))\n"
+        "    .filter(total__gt=0))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert diags == []
+
+
+def test_filter_without_matching_alias_still_flagged(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """``bogus`` isn't an alias *and* isn't a model field — still flagged."""
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "(Author.objects\n"
+        "    .annotate(article_count=Count('articles'))\n"
+        "    .filter(bogus=1))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert any("bogus" in d["message"] for d in diags)
+
+
+def test_alias_only_visible_in_same_expression(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """An alias defined upstream on a different statement is not picked
+    up — same-expression scope only (cheap, no flow analysis)."""
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "qs = Author.objects.annotate(n=Count('articles'))\n"
+        "qs.filter(n=5)\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    # qs.filter resolves to Author, then `n` isn't a real field → flagged.
+    # This documents current behaviour; the FUTURE_PLANS note explicitly
+    # scopes the first cut to same-expression.
+    assert any("'n'" in d["message"] for d in diags)
+
+
+def test_get_user_model_chain_validates_against_user(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path,
+):
+    """``UserCls = get_user_model(); UserCls.objects.filter(bogus=1)`` —
+    the alias resolves to the User builtin, so ``bogus`` is flagged."""
+    src = (
+        "from django.contrib.auth import get_user_model\n"
+        "\n"
+        "UserCls = get_user_model()\n"
+        "UserCls.objects.filter(bogus=1)\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_basic.additional_diagnostics(uri)
+    assert any(
+        d["code"] == "django-unknown-orm-lookup" and "bogus" in d["message"]
+        for d in diags
+    )
+
+
+def test_get_user_model_known_field_silent(
+    analyzer_basic: DjangoAnalyzer, tmp_path: Path,
+):
+    src = (
+        "from django.contrib.auth import get_user_model\n"
+        "\n"
+        "UserCls = get_user_model()\n"
+        "UserCls.objects.filter(username='x')\n"
+    )
+    uri = _write(tmp_path, src)
+    assert analyzer_basic.additional_diagnostics(uri) == []
+
+
+def test_alias_method_alias_function(
+    analyzer_blog: DjangoAnalyzer, tmp_path: Path,
+):
+    """``.alias()`` is the unindexed cousin of ``.annotate()`` — it also
+    declares an alias that downstream filters/order_by can use."""
+    src = (
+        "from django.db.models import Count\n"
+        "from blog.models import Author\n"
+        "(Author.objects\n"
+        "    .alias(n=Count('articles'))\n"
+        "    .filter(n__gt=0))\n"
+    )
+    uri = _write(tmp_path, src)
+    diags = analyzer_blog.additional_diagnostics(uri)
+    assert diags == []

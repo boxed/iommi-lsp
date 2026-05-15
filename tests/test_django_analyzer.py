@@ -36,6 +36,202 @@ def _uri_for(rel_path: str) -> str:
     return (CORPUS / rel_path).as_uri()
 
 
+def test_custom_queryset_method_is_dropped(tmp_path: Path):
+    """``MyQuerySet.as_manager()`` exposes custom methods on the manager —
+    ty doesn't see them. We suppress on any workspace QuerySet method
+    name accessed via a known model's manager."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "\n"
+        "class OrderQuerySet(models.QuerySet):\n"
+        "    def active(self):\n"
+        "        return self.filter(is_active=True)\n"
+        "\n"
+        "class Order(models.Model):\n"
+        "    is_active = models.BooleanField(default=True)\n"
+        "    objects = OrderQuerySet.as_manager()\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src = (
+        "from shop.models import Order\n"
+        "\n"
+        "def f():\n"
+        "    return Order.objects.active()\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    line = 3
+    col = src.splitlines()[line].index("active")
+    diag = _diag(line, col, col + len("active"), "active")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_unknown_method_on_manager_is_kept(tmp_path: Path):
+    """A genuinely unknown method (no workspace QuerySet defines it) stays."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "\n"
+        "class OrderQuerySet(models.QuerySet):\n"
+        "    def active(self):\n"
+        "        return self.filter(is_active=True)\n"
+        "\n"
+        "class Order(models.Model):\n"
+        "    is_active = models.BooleanField(default=True)\n"
+        "    objects = OrderQuerySet.as_manager()\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src = (
+        "from shop.models import Order\n"
+        "\n"
+        "def f():\n"
+        "    return Order.objects.totallybogus()\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    line = 3
+    col = src.splitlines()[line].index("totallybogus")
+    diag = _diag(line, col, col + len("totallybogus"), "totallybogus")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_custom_manager_subclass_methods_picked_up(tmp_path: Path):
+    """Subclasses of ``models.Manager`` also surface their methods."""
+    (tmp_path / "shop").mkdir()
+    (tmp_path / "shop" / "__init__.py").write_text("")
+    (tmp_path / "shop" / "models.py").write_text(
+        "from django.db import models\n"
+        "\n"
+        "class OrderManager(models.Manager):\n"
+        "    def recent(self):\n"
+        "        return self.all()\n"
+        "\n"
+        "class Order(models.Model):\n"
+        "    objects = OrderManager()\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+
+    src = (
+        "from shop.models import Order\n"
+        "\n"
+        "Order.objects.recent()\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    line = 2
+    col = src.splitlines()[line].index("recent")
+    diag = _diag(line, col, col + len("recent"), "recent")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_get_user_model_assignment_resolves_receiver(tmp_path: Path):
+    src = (
+        "from django.contrib.auth import get_user_model\n"
+        "\n"
+        "def f():\n"
+        "    UserCls = get_user_model()\n"
+        "    return UserCls.objects\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("objects")
+    diag = _diag(line, start, start + len("objects"), "objects")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_get_user_model_attribute_call(tmp_path: Path):
+    """``auth.get_user_model()`` (attribute-style import)."""
+    src = (
+        "from django.contrib import auth\n"
+        "\n"
+        "def f():\n"
+        "    U = auth.get_user_model()\n"
+        "    return U.objects\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 4
+    start = src.splitlines()[line].index("objects")
+    diag = _diag(line, start, start + len("objects"), "objects")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_m2m_through_on_class_attribute_is_dropped(tmp_path: Path):
+    src = (
+        "from blog.models import Tag\n"
+        "\n"
+        "def f():\n"
+        "    return Tag.articles.through\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 3
+    start = src.splitlines()[line].index("through")
+    diag = _diag(line, start, start + len("through"), "through")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_m2m_through_on_instance_via_flow_is_dropped(tmp_path: Path):
+    src = (
+        "from blog.models import Tag\n"
+        "\n"
+        "def f():\n"
+        "    tag = Tag.objects.get(pk=1)\n"
+        "    return tag.articles.through\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 4
+    start = src.splitlines()[line].index("through")
+    diag = _diag(line, start, start + len("through"), "through")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_through_on_non_m2m_is_kept(tmp_path: Path):
+    """``through`` on something that isn't a M2M field is a real bug."""
+    src = (
+        "from blog.models import Tag\n"
+        "\n"
+        "def f():\n"
+        "    return Tag.name.through\n"   # name is a CharField
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 3
+    start = src.splitlines()[line].index("through")
+    diag = _diag(line, start, start + len("through"), "through")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
 def test_objects_on_known_model_is_dropped(tmp_path: Path):
     src = "from myapp.models import User\n\ndef f():\n    return User.objects\n"
     f = tmp_path / "u.py"

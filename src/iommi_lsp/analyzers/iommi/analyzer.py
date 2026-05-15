@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 
 from ... import log
 from ..base import CompletionResult, Diagnostic
+from ..django import lookup_walker
 from .graph import GRAPH_FILENAME, IommiClass, IommiGraph, Refinable, load_graph
 from .walker import (
     Problem,
@@ -41,6 +42,29 @@ _log = log.get("iommi.analyzer")
 
 _IOMMI_DIAG_CODE = "iommi-unknown-refinable"
 _IOMMI_DIAG_SOURCE = "iommi_lsp"
+_IOMMI_ATTR_PATH_CODE = "iommi-unknown-attr-path"
+_IOMMI_CALLABLE_CODE = "iommi-callable-expected"
+
+
+# Refinable names at chain leaves that iommi calls as functions. Passing
+# a string here is almost always a typo for a name reference (the classic
+# ``Action(post_handler='save')`` instead of ``post_handler=save``).
+# Kept narrow on purpose — overbroad flagging masks more bugs than it
+# catches, since some refinables (``extra__url`` and friends) are happy
+# with strings.
+_CALLABLE_LEAVES: frozenset[str] = frozenset({
+    "post_handler",   # Action(post_handler=fn) / Form(actions__x__post_handler=fn)
+    "func",           # endpoints__<name>__func=view, Page(parts__handler__func=fn)
+    "on_commit",      # form lifecycle hooks
+    "on_save",
+})
+
+
+class _Unset:
+    pass
+
+
+_UNSET = _Unset()
 
 
 # Built-in iommi styles. Users can register more via
@@ -433,6 +457,7 @@ class IommiAnalyzer:
             if cls is None:
                 return
 
+        auto_model: "ModelInfo | None | _Unset" = _UNSET
         for kw in node.keywords:
             if kw.arg is None:
                 continue   # **kwargs splat — skip
@@ -442,6 +467,82 @@ class IommiAnalyzer:
                 diag = _problem_to_diagnostic(parsed.source, kw, chain, result)
                 if diag is not None:
                     yield diag
+                continue
+
+            # ``Form(fields__name__attr='path')`` / ``Table(columns__c__attr='p')``
+            # — bridge iommi's ``attr`` value to a Django model lookup. iommi
+            # resolves the attr string against the bound auto model at
+            # runtime; we can do the same statically when ``auto__model=``
+            # (or ``rows=``/``instance=``/``model=``) is in the same call.
+            if (
+                len(chain) >= 3
+                and chain[-1] == "attr"
+                and isinstance(kw.value, ast.Constant)
+                and isinstance(kw.value.value, str)
+            ):
+                if auto_model is _UNSET:
+                    auto_model = self._resolve_auto_model(node)
+                if auto_model is not None:
+                    diag = self._validate_attr_path(
+                        kw.value, auto_model,
+                    )
+                    if diag is not None:
+                        yield diag
+
+            # ``Action(post_handler='save')`` / endpoint ``__func='view'`` —
+            # iommi calls these values as functions; a string Constant is
+            # almost always a typo for a name reference.
+            if chain[-1] in _CALLABLE_LEAVES:
+                diag = _validate_callable_value(kw)
+                if diag is not None:
+                    yield diag
+
+    def _validate_attr_path(
+        self, const: ast.Constant, model: "ModelInfo",
+    ) -> Diagnostic | None:
+        index = (
+            self._django_index_provider()
+            if self._django_index_provider else None
+        )
+        if index is None:
+            return None
+        value = const.value
+        if not isinstance(value, str) or not value:
+            return None
+        chain = lookup_walker.split_chain(value)
+        result = lookup_walker.walk(index, model.qualname, chain)
+        if not isinstance(result, lookup_walker.Problem):
+            return None
+        if const.lineno is None or const.col_offset is None:
+            return None
+        line0 = const.lineno - 1
+        col_start = const.col_offset + 1   # skip opening quote
+        seg_offset = 0
+        for i, seg in enumerate(chain):
+            if i == result.segment_index:
+                break
+            seg_offset += len(seg) + len("__")
+        col_start += seg_offset
+        col_end = col_start + len(result.bad_segment)
+        msg = (
+            f"unknown attr path segment {result.bad_segment!r} "
+            f"on {result.on_model}"
+        )
+        if result.available:
+            hint = ", ".join(sorted(result.available)[:8])
+            if len(result.available) > 8:
+                hint += ", …"
+            msg += f"  (available: {hint})"
+        return {
+            "code": _IOMMI_ATTR_PATH_CODE,
+            "message": msg,
+            "range": {
+                "start": {"line": line0, "character": col_start},
+                "end": {"line": line0, "character": col_end},
+            },
+            "severity": 2,
+            "source": _IOMMI_DIAG_SOURCE,
+        }
 
     def _scan_class_meta(
         self,
@@ -702,6 +803,38 @@ def _meta_assignment_targets(stmt: ast.stmt) -> list[ast.Name]:
     if isinstance(stmt, ast.Assign):
         return [t for t in stmt.targets if isinstance(t, ast.Name)]
     return []
+
+
+def _validate_callable_value(kw: ast.keyword) -> Diagnostic | None:
+    """Flag string-Constant values at known callable-expecting refinables.
+
+    Iommi receives these as functions and calls them — passing a string
+    silently breaks the view at request time. We only flag literal
+    strings; Name / Attribute / Call / Lambda values pass through (ty
+    catches undefined names; signature validation is a future problem).
+    """
+    value = kw.value
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+        return None
+    if value.lineno is None or value.col_offset is None:
+        return None
+    line0 = value.lineno - 1
+    col_start = value.col_offset
+    end_line = (value.end_lineno or value.lineno) - 1
+    end_col = value.end_col_offset or (col_start + len(value.value) + 2)
+    return {
+        "code": _IOMMI_CALLABLE_CODE,
+        "message": (
+            f"{kw.arg!r} expects a callable; got a string literal — "
+            f"did you mean to drop the quotes?"
+        ),
+        "range": {
+            "start": {"line": line0, "character": col_start},
+            "end": {"line": end_line, "character": end_col},
+        },
+        "severity": 2,
+        "source": _IOMMI_DIAG_SOURCE,
+    }
 
 
 def _problem_at_name(

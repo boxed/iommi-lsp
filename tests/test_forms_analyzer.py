@@ -280,3 +280,189 @@ def test_diagnostic_no_fields_silent(analyzer, tmp_path: Path) -> None:
     f = tmp_path / "forms.py"
     f.write_text(src)
     assert analyzer.additional_diagnostics(f.as_uri()) == []
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics: Meta.widgets / labels / help_texts / error_messages dict keys
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostic_meta_widgets_unknown_key(analyzer, tmp_path: Path) -> None:
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email', 'username']\n"
+        "        widgets = {'email': forms.EmailInput(),\n"
+        "                   'eemail': forms.EmailInput()}\n"
+    )
+    f = tmp_path / "forms.py"
+    f.write_text(src)
+    diags = analyzer.additional_diagnostics(f.as_uri())
+    assert any(
+        d.get("code") == "django-unknown-form-field"
+        and "eemail" in d.get("message", "")
+        and "widgets" in d.get("message", "")
+        for d in diags
+    )
+
+
+def test_diagnostic_meta_labels_known_key_silent(analyzer, tmp_path: Path) -> None:
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email']\n"
+        "        labels = {'email': 'E-mail'}\n"
+    )
+    f = tmp_path / "forms.py"
+    f.write_text(src)
+    diags = analyzer.additional_diagnostics(f.as_uri())
+    assert [d for d in diags if d.get("code") == "django-unknown-form-field"] == []
+
+
+def test_diagnostic_meta_help_texts_unknown_key(analyzer, tmp_path: Path) -> None:
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email']\n"
+        "        help_texts = {'whatever': 'nope'}\n"
+    )
+    f = tmp_path / "forms.py"
+    f.write_text(src)
+    diags = analyzer.additional_diagnostics(f.as_uri())
+    assert any(
+        d.get("code") == "django-unknown-form-field"
+        and "whatever" in d.get("message", "")
+        for d in diags
+    )
+
+
+def test_diagnostic_meta_error_messages_unknown_key(
+    analyzer, tmp_path: Path,
+) -> None:
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email']\n"
+        "        error_messages = {'usrname': {'required': 'Required.'}}\n"
+    )
+    f = tmp_path / "forms.py"
+    f.write_text(src)
+    diags = analyzer.additional_diagnostics(f.as_uri())
+    assert any(
+        d.get("code") == "django-unknown-form-field"
+        and "usrname" in d.get("message", "")
+        for d in diags
+    )
+
+
+# ---------------------------------------------------------------------------
+# Completion: Meta.widgets dict keys
+# ---------------------------------------------------------------------------
+
+
+def test_completion_meta_widgets_key(analyzer, tmp_path: Path) -> None:
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email', 'username']\n"
+        "        widgets = {'"
+    )
+    uri, pos = _write_with_cursor(tmp_path, src)
+    result = analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    labels = set(_labels(result))
+    assert "email" in labels
+    assert "username" in labels
+    # ``__all__`` is *not* offered for dict keys (unlike Meta.fields).
+    assert "__all__" not in labels
+
+
+def test_completion_meta_widgets_key_partial(analyzer, tmp_path: Path) -> None:
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email', 'username']\n"
+        "        widgets = {'em"
+    )
+    uri, pos = _write_with_cursor(tmp_path, src)
+    result = analyzer.completions(uri, pos)
+    assert _labels(result) == ["email"]
+
+
+def test_completion_meta_widgets_second_key(analyzer, tmp_path: Path) -> None:
+    """Second key of an in-progress dict — still completes correctly."""
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email', 'username']\n"
+        "        widgets = {\n"
+        "            'email': forms.EmailInput(),\n"
+        "            '"
+    )
+    uri, pos = _write_with_cursor(tmp_path, src)
+    result = analyzer.completions(uri, pos)
+    assert result.exclusive is True
+    assert "username" in set(_labels(result))
+
+
+def test_completion_meta_labels_key(analyzer, tmp_path: Path) -> None:
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email']\n"
+        "        labels = {'"
+    )
+    uri, pos = _write_with_cursor(tmp_path, src)
+    result = analyzer.completions(uri, pos)
+    assert "email" in set(_labels(result))
+
+
+def test_completion_meta_widgets_value_not_field(analyzer, tmp_path: Path) -> None:
+    """Cursor on the value side of a key:value pair should *not* be
+    treated as a field-name slot — that's a widget class instance."""
+    src = (
+        "from django import forms\n"
+        "from myapp.models import User\n"
+        "\n"
+        "class UserForm(forms.ModelForm):\n"
+        "    class Meta:\n"
+        "        model = User\n"
+        "        fields = ['email']\n"
+        "        labels = {'email': '"
+    )
+    uri, pos = _write_with_cursor(tmp_path, src)
+    result = analyzer.completions(uri, pos)
+    assert result.items == []
+    assert result.exclusive is False

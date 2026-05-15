@@ -4,3 +4,10 @@ command = "iommi_lsp"
 [[language]]
 name = "python"
 language-servers = ["iommi_lsp"]
+
+# Django template tags ({% url %}, {% extends %}, {% block %}, …) live
+# in HTML files; route those through iommi_lsp too so the screenshots
+# can demonstrate template-tag completion.
+[[language]]
+name = "html"
+language-servers = ["iommi_lsp"]

@@ -188,7 +188,57 @@ class DjangoAnalyzer:
             if ann_model is not None and attr_name in ann_model.fk_id_accessors:
                 return True
 
+        # ``<m2m>.through`` — Django attaches ``through`` to every
+        # ManyToManyField descriptor. ty can't see it without runtime
+        # stubs, so suppress when the receiver is a known M2M field on a
+        # recognised model.
+        if attr_name == "through" and self._is_m2m_receiver(receiver, parsed.tree):
+            return True
+
+        # ``<Model>.<manager>.<custom_method>`` — custom QuerySet methods
+        # surfaced via ``objects = MyQuerySet.as_manager()``. ty doesn't
+        # see those methods. We resolve the manager attribute access and
+        # check the workspace-wide queryset method union.
+        if self._is_manager_method_access(receiver, attr_name, parsed.tree):
+            return True
+
         return False
+
+    def _is_manager_method_access(
+        self, receiver: ast.AST, attr_name: str, tree: ast.Module,
+    ) -> bool:
+        """``<receiver_resolving_to_model>.<manager_name>.<attr_name>``
+        where *attr_name* is in the workspace's QuerySet method union.
+        """
+        if attr_name not in self.django_index.custom_queryset_methods:
+            return False
+        if not isinstance(receiver, ast.Attribute):
+            return False
+        if receiver.attr not in _MANAGER_NAMES:
+            return False
+        owner = receiver.value
+        # ``Model.objects.method`` — owner is a Name resolving to a model.
+        if isinstance(owner, ast.Name):
+            if self.django_index.lookup(owner.id) is not None:
+                return True
+            local = self._resolve_local_variable(owner.id, owner, tree)
+            return local is not None
+        # ``models.User.objects.method`` — dotted-path access.
+        if isinstance(owner, ast.Attribute):
+            return self.django_index.lookup(owner.attr) is not None
+        return False
+
+    def _is_m2m_receiver(self, receiver: ast.AST, tree: ast.Module) -> bool:
+        """``receiver`` is ``<model_or_instance>.<m2m_field_name>``?"""
+        if not isinstance(receiver, ast.Attribute):
+            return False
+        owner_model = self._resolve_receiver_model(receiver.value, tree)
+        if owner_model is None:
+            owner_model = self._resolve_via_annotation(receiver.value, tree)
+        if owner_model is None:
+            return False
+        fi = owner_model.fields.get(receiver.attr)
+        return fi is not None and fi.field_type == "ManyToManyField"
 
     def _parse(self, uri: str, path: Path) -> _ParsedFile | None:
         source = self._source_for(uri, path)
@@ -342,6 +392,13 @@ class DjangoAnalyzer:
 
     def _infer_call_result_model(self, value: ast.AST) -> ModelInfo | None:
         """Recognise ``Model(...)`` and ``Model.objects.<method>(...)``."""
+        # ``get_user_model()`` / ``django.contrib.auth.get_user_model()`` —
+        # Django's runtime AUTH_USER_MODEL resolver. We can't read the
+        # project's setting statically, but the builtin contrib User is
+        # the right default; a workspace ``User`` model shadows it via
+        # ``DjangoIndex.lookup`` anyway.
+        if _is_get_user_model_call(value):
+            return self.django_index.lookup("User")
         # Model(...) — direct instantiation.
         if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
             return self.django_index.lookup(value.func.id)
@@ -679,19 +736,28 @@ class DjangoAnalyzer:
             model = self._root_manager_model(node.func.value, parsed.tree)
             if model is None:
                 continue
+            # Upstream ``annotate(alias=…)`` / ``aggregate(alias=…)`` /
+            # ``alias(alias=…)`` declarations in the same expression
+            # chain — those alias names are valid leaf lookups for the
+            # filter/order_by/etc. that consumes them.
+            aliases = _collect_chain_aliases(node)
             if method in _LOOKUP_METHODS:
                 # `.filter(name__icontains=…)` — direct kwargs.
-                yield from self._validate_kwargs(parsed, model, node.keywords)
+                yield from self._validate_kwargs(
+                    parsed, model, node.keywords, aliases=aliases,
+                )
                 # `.filter(Q(a=1) | Q(b=2), …)` — kwargs inside Q expressions.
                 for arg in node.args:
                     for q_kwargs in _iter_q_kwargs(arg):
-                        yield from self._validate_kwargs(parsed, model, q_kwargs)
+                        yield from self._validate_kwargs(
+                            parsed, model, q_kwargs, aliases=aliases,
+                        )
             if method in _FIELD_PATH_METHODS:
                 yield from self._validate_field_path_args(
-                    parsed, model, node.args, method
+                    parsed, model, node.args, method, aliases=aliases,
                 )
             # F('field__path') anywhere in the call's args/kwargs.
-            yield from self._validate_f_calls(model, node)
+            yield from self._validate_f_calls(model, node, aliases=aliases)
 
     def _helper_first_arg_model(
         self, arg: ast.AST, tree: ast.Module,
@@ -719,6 +785,7 @@ class DjangoAnalyzer:
         model: ModelInfo,
         args: list[ast.expr],
         method: str,
+        aliases: frozenset[str] = frozenset(),
     ):
         for arg in args:
             # ``prefetch_related(Prefetch('rel', queryset=...))`` — the
@@ -755,13 +822,18 @@ class DjangoAnalyzer:
             if not chain_str:
                 continue
             chain = lookup_walker.split_chain(chain_str)
+            if _chain_starts_with_alias(chain, aliases):
+                continue
             result = lookup_walker.walk(self.django_index, model.qualname, chain)
             if isinstance(result, lookup_walker.Problem):
                 diag = _string_problem_to_diagnostic(arg, chain, leading, result)
                 if diag is not None:
                     yield diag
 
-    def _validate_f_calls(self, model: ModelInfo, call: ast.Call):
+    def _validate_f_calls(
+        self, model: ModelInfo, call: ast.Call,
+        aliases: frozenset[str] = frozenset(),
+    ):
         """Find F('field__path') anywhere in *call*'s arg/kwarg subtrees."""
         seen: set[int] = set()
         for sub in _iter_arg_subtrees(call):
@@ -778,6 +850,8 @@ class DjangoAnalyzer:
                 if not isinstance(arg0, ast.Constant) or not isinstance(arg0.value, str):
                     continue
                 chain = lookup_walker.split_chain(arg0.value)
+                if _chain_starts_with_alias(chain, aliases):
+                    continue
                 result = lookup_walker.walk(self.django_index, model.qualname, chain)
                 if isinstance(result, lookup_walker.Problem):
                     diag = _string_problem_to_diagnostic(arg0, chain, 0, result)
@@ -789,6 +863,7 @@ class DjangoAnalyzer:
         parsed: _ParsedFile,
         model: ModelInfo,
         kwargs: list[ast.keyword],
+        aliases: frozenset[str] = frozenset(),
     ):
         for kw in kwargs:
             if kw.arg is None:
@@ -796,6 +871,8 @@ class DjangoAnalyzer:
             if kw.arg in _METHOD_ONLY_KWARGS:
                 continue
             chain = lookup_walker.split_chain(kw.arg)
+            if _chain_starts_with_alias(chain, aliases):
+                continue
             result = lookup_walker.walk(self.django_index, model.qualname, chain)
             if isinstance(result, lookup_walker.Problem):
                 diag = _problem_to_diagnostic(parsed.source, kw, chain, result)
@@ -839,7 +916,16 @@ class DjangoAnalyzer:
                 return None
             owner = cur.value
             if isinstance(owner, ast.Name):
-                return self.django_index.lookup(owner.id)
+                info = self.django_index.lookup(owner.id)
+                if info is not None:
+                    return info
+                # Fall back to local-flow resolution: ``UserCls =
+                # get_user_model()`` (or any other model-returning call)
+                # rebinds the name, but ``UserCls.objects.filter(...)``
+                # should still validate against the bound model.
+                if tree is not None and owner.id not in visited:
+                    return self._resolve_local_variable(owner.id, owner, tree)
+                return None
             if isinstance(owner, ast.Attribute):
                 # `models.User.objects` / `app.models.User.objects`.
                 return self.django_index.lookup(owner.attr)
@@ -894,6 +980,64 @@ class DjangoAnalyzer:
 # ---------------------------------------------------------------------------
 # Helpers — kept module-level so they're easy to test in isolation later.
 # ---------------------------------------------------------------------------
+
+
+def _is_get_user_model_call(value: ast.AST) -> bool:
+    """``get_user_model()`` / ``auth.get_user_model()`` / etc."""
+    if not isinstance(value, ast.Call):
+        return False
+    func = value.func
+    if isinstance(func, ast.Name):
+        return func.id == "get_user_model"
+    if isinstance(func, ast.Attribute):
+        return func.attr == "get_user_model"
+    return False
+
+
+def _collect_chain_aliases(call: ast.Call) -> frozenset[str]:
+    """Walk back through ``call``'s receiver chain collecting alias names
+    declared by sibling ``.annotate(...)`` / ``.aggregate(...)`` /
+    ``.alias(...)`` calls.
+
+    Scope is intentionally the *same expression chain*: aliases defined
+    on a queryset variable upstream (``qs = User.objects.annotate(x=…);
+    qs.filter(x=1)``) aren't picked up. The expression-chain case is the
+    cheap, no-flow-analysis fix from FUTURE_PLANS.
+    """
+    aliases: set[str] = set()
+    cur: ast.AST | None = (
+        call.func.value if isinstance(call.func, ast.Attribute) else None
+    )
+    while isinstance(cur, ast.Call):
+        func = cur.func
+        if not isinstance(func, ast.Attribute):
+            break
+        if func.attr in _AGGREGATE_METHODS:
+            for kw in cur.keywords:
+                if kw.arg:
+                    aliases.add(kw.arg)
+        cur = func.value
+    return frozenset(aliases)
+
+
+def _chain_starts_with_alias(
+    chain: list[str], aliases: frozenset[str],
+) -> bool:
+    """Treat ``alias`` and ``alias__<known_lookup>`` as valid leaves.
+
+    Annotated values are scalar in Django — you can chain a transform/
+    lookup (``myalias__gte``) but not a field traversal. The walker
+    can't see local aliases, so we short-circuit here.
+    """
+    if not aliases or not chain:
+        return False
+    if chain[0] not in aliases:
+        return False
+    # Aliases that resolve to a relation (``Count('articles')`` returns
+    # an int, but ``Subquery(qs)`` could return a row) are rare enough
+    # in practice that we accept anything past the alias rather than
+    # try to introspect the annotation's RHS.
+    return True
 
 
 def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:

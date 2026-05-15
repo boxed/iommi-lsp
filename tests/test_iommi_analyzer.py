@@ -551,3 +551,273 @@ def test_caches_parsed_file(workspace: Path):
     assert uri in a._cache
     asyncio.run(a.on_file_changed(uri))
     assert uri not in a._cache
+
+
+# ---------------------------------------------------------------------------
+# attr= bridging — Form(fields__name__attr='model__path') / Table(columns__c__attr=…)
+# ---------------------------------------------------------------------------
+
+
+def _make_attr_bridge_graph() -> IommiGraph:
+    """Graph that exposes ``attr`` as a refinable on Column/Field."""
+    column = IommiClass(
+        qualname="iommi.table.Column",
+        bases=["iommi.part.Part"],
+        refinables={
+            "attr": _r("attr", "evaluated_scalar"),
+        },
+    )
+    field = IommiClass(
+        qualname="iommi.form.Field",
+        bases=["iommi.part.Part"],
+        refinables={
+            "attr": _r("attr", "evaluated_scalar"),
+        },
+    )
+    part = IommiClass(
+        qualname="iommi.part.Part",
+        bases=[],
+        refinables={},
+    )
+    table = IommiClass(
+        qualname="iommi.table.Table",
+        bases=["iommi.part.Part"],
+        refinables={
+            "columns": _r("columns", "members", member_class="iommi.table.Column"),
+        },
+    )
+    form = IommiClass(
+        qualname="iommi.form.Form",
+        bases=["iommi.part.Part"],
+        refinables={
+            "fields": _r("fields", "members", member_class="iommi.form.Field"),
+        },
+    )
+    return IommiGraph(
+        iommi_version="0.0-test",
+        classes={c.qualname: c for c in [table, form, column, field, part]},
+    )
+
+
+@pytest.fixture
+def attr_workspace(tmp_path: Path) -> Path:
+    save_graph(_make_attr_bridge_graph(), tmp_path / GRAPH_FILENAME)
+    return tmp_path
+
+
+def _attr_analyzer(workspace: Path) -> IommiAnalyzer:
+    from iommi_lsp.analyzers.django.index import (
+        DjangoIndex,
+        FieldInfo,
+        ModelInfo,
+    )
+
+    user = ModelInfo(
+        qualname="myapp.models.User",
+        module="myapp.models",
+        name="User",
+        file_path=workspace / "myapp" / "models.py",
+        bases=["django.db.models.Model"],
+        fields={
+            "username": FieldInfo(name="username", field_type="CharField"),
+            "email": FieldInfo(name="email", field_type="EmailField"),
+        },
+    )
+    index = DjangoIndex()
+    index.add_model(user)
+    a = IommiAnalyzer(
+        workspace_root=workspace,
+        django_index_provider=lambda: index,
+    )
+    asyncio.run(a.index(workspace))
+    return a
+
+
+def test_attr_path_validates_against_auto_model(attr_workspace: Path):
+    f = _write_usage(attr_workspace, """
+        from iommi import Form
+
+        Form(
+            auto__model=User,
+            fields__nickname__attr='usernme',
+        )
+    """)
+    a = _attr_analyzer(attr_workspace)
+    diags = a.additional_diagnostics(f.as_uri())
+    assert any(
+        d.get("code") == "iommi-unknown-attr-path"
+        and "usernme" in d.get("message", "")
+        for d in diags
+    )
+
+
+def test_attr_path_valid_value_silent(attr_workspace: Path):
+    f = _write_usage(attr_workspace, """
+        from iommi import Form
+
+        Form(
+            auto__model=User,
+            fields__nickname__attr='username',
+        )
+    """)
+    a = _attr_analyzer(attr_workspace)
+    diags = a.additional_diagnostics(f.as_uri())
+    assert [d for d in diags if d.get("code") == "iommi-unknown-attr-path"] == []
+
+
+def test_attr_path_table_via_rows(attr_workspace: Path):
+    """``rows=Model.objects.all()`` should also bind the model."""
+    f = _write_usage(attr_workspace, """
+        from iommi import Table
+
+        Table(
+            rows=User.objects.all(),
+            columns__nickname__attr='nope_field',
+        )
+    """)
+    a = _attr_analyzer(attr_workspace)
+    diags = a.additional_diagnostics(f.as_uri())
+    assert any(
+        d.get("code") == "iommi-unknown-attr-path"
+        and "nope_field" in d.get("message", "")
+        for d in diags
+    )
+
+
+def test_attr_path_silent_without_auto_model(attr_workspace: Path):
+    """No bound model — we can't know what attr resolves against, so silent."""
+    f = _write_usage(attr_workspace, """
+        from iommi import Form
+
+        Form(fields__nickname__attr='whatever')
+    """)
+    a = _attr_analyzer(attr_workspace)
+    diags = a.additional_diagnostics(f.as_uri())
+    assert [d for d in diags if d.get("code") == "iommi-unknown-attr-path"] == []
+
+
+# ---------------------------------------------------------------------------
+# Action(post_handler=…) / endpoints__name__func — callable-expected check
+# ---------------------------------------------------------------------------
+
+
+def _make_callable_leaf_graph() -> IommiGraph:
+    """Graph with ``post_handler`` / ``func`` refinables on Action."""
+    action = IommiClass(
+        qualname="iommi.action.Action",
+        bases=[],
+        refinables={
+            "post_handler": _r("post_handler", "scalar"),
+            "tag": _r("tag", "evaluated_scalar"),
+        },
+    )
+    endpoint = IommiClass(
+        qualname="iommi.endpoint.Endpoint",
+        bases=[],
+        refinables={
+            "func": _r("func", "scalar"),
+        },
+    )
+    form = IommiClass(
+        qualname="iommi.form.Form",
+        bases=[],
+        refinables={
+            "actions": _r(
+                "actions", "members", member_class="iommi.action.Action",
+            ),
+            "endpoints": _r(
+                "endpoints", "members", member_class="iommi.endpoint.Endpoint",
+            ),
+        },
+    )
+    return IommiGraph(
+        iommi_version="0.0-test",
+        classes={c.qualname: c for c in [form, action, endpoint]},
+    )
+
+
+@pytest.fixture
+def callable_leaf_workspace(tmp_path: Path) -> Path:
+    save_graph(_make_callable_leaf_graph(), tmp_path / GRAPH_FILENAME)
+    return tmp_path
+
+
+def test_post_handler_string_flagged(callable_leaf_workspace: Path):
+    diags = _diagnose(callable_leaf_workspace, """
+        from iommi import Action
+
+        Action(post_handler='save_widget')
+    """)
+    assert any(
+        d.get("code") == "iommi-callable-expected"
+        and "'post_handler'" in d.get("message", "")
+        for d in diags
+    )
+
+
+def test_post_handler_name_silent(callable_leaf_workspace: Path):
+    """Name references go through ty — no iommi-callable-expected."""
+    diags = _diagnose(callable_leaf_workspace, """
+        from iommi import Action
+
+        def save_widget(form, **_): pass
+
+        Action(post_handler=save_widget)
+    """)
+    assert [d for d in diags if d.get("code") == "iommi-callable-expected"] == []
+
+
+def test_post_handler_lambda_silent(callable_leaf_workspace: Path):
+    diags = _diagnose(callable_leaf_workspace, """
+        from iommi import Action
+
+        Action(post_handler=lambda form, **_: None)
+    """)
+    assert [d for d in diags if d.get("code") == "iommi-callable-expected"] == []
+
+
+def test_form_actions_post_handler_chain_flagged(callable_leaf_workspace: Path):
+    """``Form(actions__save__post_handler='...')`` — chain ends in
+    ``post_handler`` and value is a string literal."""
+    diags = _diagnose(callable_leaf_workspace, """
+        from iommi import Form
+
+        Form(actions__save__post_handler='go')
+    """)
+    assert any(
+        d.get("code") == "iommi-callable-expected" for d in diags
+    )
+
+
+def test_endpoints_func_chain_flagged(callable_leaf_workspace: Path):
+    diags = _diagnose(callable_leaf_workspace, """
+        from iommi import Form
+
+        Form(endpoints__my_endpoint__func='handle')
+    """)
+    assert any(
+        d.get("code") == "iommi-callable-expected" for d in diags
+    )
+
+
+def test_attr_path_diagnostic_pins_bad_segment(attr_workspace: Path):
+    f = _write_usage(attr_workspace, """
+        from iommi import Form
+
+        Form(
+            auto__model=User,
+            fields__nickname__attr='emailx',
+        )
+    """)
+    a = _attr_analyzer(attr_workspace)
+    diags = [
+        d for d in a.additional_diagnostics(f.as_uri())
+        if d.get("code") == "iommi-unknown-attr-path"
+    ]
+    assert len(diags) == 1
+    d = diags[0]
+    src = f.read_text()
+    line = src.splitlines()[d["range"]["start"]["line"]]
+    col_start = d["range"]["start"]["character"]
+    col_end = d["range"]["end"]["character"]
+    assert line[col_start:col_end] == "emailx"

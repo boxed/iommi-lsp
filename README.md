@@ -29,7 +29,10 @@ A Django and iommi language server that proxies to
   `Prefetch('rel', queryset=...)` calls, and the
   `get_object_or_404(Model, name=...)` / `get_list_or_404(...)`
   shortcuts — full `__`-traversal through relations and reverse
-  relations.
+  relations. Aliases declared by a sibling `.annotate(name=...)` /
+  `.aggregate(name=...)` / `.alias(name=...)` in the same expression
+  chain are accepted as valid leaves on downstream `.filter()` /
+  `.order_by()` calls.
 
   ![](docs/screenshots/out/orm-diagnostic.png)
 
@@ -38,9 +41,13 @@ A Django and iommi language server that proxies to
   honours `include(...)` namespaces (and `app_name = '…'`), and feeds:
   completion inside `reverse('‸')` / `reverse_lazy('‸')` /
   `redirect('‸')` / `resolve_url('‸')`, plus
-  `django-unknown-url-name` diagnostics for typos.
+  `django-unknown-url-name` diagnostics for typos. The same index is
+  reused inside Django templates: `{% url '‸' %}` completes against
+  the index, and unknown names raise `django-unknown-url-name`.
 
   ![](docs/screenshots/out/url-completion.png)
+  ![](docs/screenshots/out/template-url-tag.png)
+  ![](docs/screenshots/out/template-url-diagnostic.png)
 
 * **Admin field validation.** Inside `class FooAdmin(admin.ModelAdmin):`
   (registered via `@admin.register(MyModel)` or `admin.site.register(MyModel, FooAdmin)`),
@@ -55,23 +62,34 @@ A Django and iommi language server that proxies to
   ![](docs/screenshots/out/admin-completion.png)
 
 * **ModelForm / Form awareness.** `Meta.fields` / `Meta.exclude` are
-  validated against the bound model; `clean_<field>` methods on
-  `Form` / `ModelForm` subclasses fire `django-unknown-clean-method`
-  when `<field>` isn't a declared form field; completion fires inside
-  `self.fields['‸']` / `self.cleaned_data['‸']`.
+  validated against the bound model; `Meta.widgets` / `Meta.labels` /
+  `Meta.help_texts` / `Meta.error_messages` / `Meta.field_classes`
+  dict keys are validated the same way and complete against model
+  fields; `clean_<field>` methods on `Form` / `ModelForm` subclasses
+  fire `django-unknown-clean-method` when `<field>` isn't a declared
+  form field; completion fires inside `self.fields['‸']` /
+  `self.cleaned_data['‸']`.
 
   ![](docs/screenshots/out/forms-completion.png)
+  ![](docs/screenshots/out/forms-meta-dict.png)
 
 * **Class-based view attributes.** `model = Foo` binds the CBV; then
   `fields = ['‸']` (UpdateView/CreateView), `ordering = ['-‸']`
   (ListView), and `slug_field = '‸'` (DetailView) all complete and
-  validate against `Foo`.
+  validate against `Foo`. Inherited mixin attrs (`paginate_by`,
+  `context_object_name`, `slug_url_kwarg`, `pk_url_kwarg`,
+  `template_name`, `queryset`, `form_class`, `success_url`, …) accessed
+  as `self.<attr>` in a CBV subclass no longer trip ty's
+  `unresolved-attribute` warning — those are real Django API, just
+  invisible to ty without runtime stubs.
 
   ![](docs/screenshots/out/views-completion.png)
 
 * **Migration dependencies.** `dependencies = [('app', '‸')]` in a
   `Migration` subclass offers the matching `<app>/migrations/`
-  filenames.
+  filenames. `RunPython.noop` / `RunSQL.noop` (passed as the reverse
+  operation in a data migration) no longer trip
+  `unresolved-attribute` either.
 
 * **Signal sender completion.** `@receiver(post_save, sender=‸)` and
   `signal.connect(handler, sender=‸)` surface workspace model
@@ -80,10 +98,12 @@ A Django and iommi language server that proxies to
 
   ![](docs/screenshots/out/signal-completion.png)
 
-* **Staticfiles completion.** Typing inside `static('‸')` offers
-  every file under any `static/` directory in the project.
+* **Staticfiles completion.** Typing inside `static('‸')` (Python) or
+  `{% static '‸' %}` (template) offers every file under any `static/`
+  directory in the project.
 
   ![](docs/screenshots/out/static-completion.png)
+  ![](docs/screenshots/out/template-static-tag.png)
 
 * **Template-name completion in any `/`-containing string.** Once the
   workspace is indexed, typing `'myapp/‸'` (where `‸` is the cursor)
@@ -92,6 +112,30 @@ A Django and iommi language server that proxies to
   non-template paths aren't suppressed.
 
   ![](docs/screenshots/out/template-completion.png)
+
+* **Django template-tag awareness.** Inside `.html` files, the LSP
+  recognises Django's tag syntax and completes contextually:
+  `{% extends '‸' %}` / `{% include '‸' %}` offer template names with
+  no `/` heuristic (the tag itself is unambiguous);
+  `{% block ‸ %}` in a child template reads the parent's
+  `{% extends '...' %}` and surfaces the parent's block names (with
+  one level of grandparent recursion); `{% load ‸ %}` autocompletes
+  any `templatetags/` library discovered across the workspace.
+
+  ![](docs/screenshots/out/template-extends-tag.png)
+  ![](docs/screenshots/out/template-block-tag.png)
+  ![](docs/screenshots/out/template-load-tag.png)
+
+* **Template filter completion.** After a `|` inside `{{ ‸ }}` or
+  `{% if ‸ %}`, the popup offers every filter in
+  `django.template.defaultfilters` (built-in — always available) plus
+  every `@register.filter` discovered in any `templatetags/` library
+  the current template `{% load %}`s. Custom filters surface their
+  registered name (so `@register.filter(name='renamed')` shows up as
+  `renamed`, not the function name). Library filters from libraries
+  the file hasn't loaded are filtered out.
+
+  ![](docs/screenshots/out/template-filter.png)
 
 * **`INSTALLED_APPS` / settings completion.** Inside `INSTALLED_APPS`,
   `MIDDLEWARE`, `AUTHENTICATION_BACKENDS`, `AUTH_USER_MODEL`,
@@ -109,8 +153,16 @@ A Django and iommi language server that proxies to
   `DoesNotExist`, `MultipleObjectsReturned`,
   `get_<field>_display()` for fields with `choices=`,
   `get_next_by_<field>()` / `get_previous_by_<field>()` on date
-  fields, …) are dropped before they reach the editor. Real bugs
-  survive.
+  fields, `<m2m>.through` on `ManyToManyField` descriptors, …) are
+  dropped before they reach the editor. Real bugs survive. Custom
+  manager methods surfaced via `objects = MyQuerySet.as_manager()` or
+  a `models.Manager` subclass are picked up workspace-wide so
+  `Order.objects.<custom_method>()` stops nagging too.
+
+* **`get_user_model()` awareness.** `UserCls = get_user_model();
+  UserCls.objects.filter(...)` resolves the binding to the contrib
+  `User` model (or to a workspace `User` that shadows it), so kwargs
+  and field-path strings validate against the right schema.
 * **No more `` `request` is unused `` nags on views.** Django view
   functions take `request` whether they read it or not — ty's hint is
   dropped when `request` is the first parameter (or first after
@@ -152,6 +204,23 @@ A Django and iommi language server that proxies to
 
 * **`iommi-unknown-refinable` diagnostics.** Invalid chains in
   `Class(kw__chain=...)` calls flag the first dead-end segment.
+
+* **`attr=` value bridging.** When `auto__model=` / `rows=` / `model=` /
+  `instance=` is in scope, the string value of
+  `fields__name__attr='nested__path'` (Form) or
+  `columns__name__attr='nested__path'` (Table) is validated as a Django
+  model lookup against the bound model — `iommi-unknown-attr-path`
+  flags the first dead segment, pinned to that segment in the string.
+
+  ![](docs/screenshots/out/iommi-attr-bridge.png)
+
+* **`iommi-callable-expected` diagnostics.** A string literal at a
+  callable-expecting refinable — `Action(post_handler='save')`,
+  `Form(endpoints__name__func='view')`, `Form(on_save='handler')`,
+  `Form(on_commit='c')` — gets flagged. Almost always a typo where
+  the user meant a name reference and accidentally quoted it.
+
+  ![](docs/screenshots/out/iommi-callable.png)
 * **Zero-setup defaults.** Synthesised stubs cover the public iommi
   classes (`Table`, `Form`, `Query`, `Page`) so all of the above
   works before any graph build succeeds; the project's own iommi
