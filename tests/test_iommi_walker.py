@@ -282,3 +282,62 @@ def test_traditional_class_without_init_members_passes(graph_with_traditional):
         ),
     })
     assert walk(g, "x.Column", ["cell", "anything"]) is OK
+
+
+@pytest.fixture
+def graph_with_traditional_attrs() -> IommiGraph:
+    """Cell.init_members includes ``attrs`` — the html_attrs namespace."""
+    column = IommiClass(
+        qualname="x.Column",
+        bases=[],
+        refinables={
+            "cell": _r("cell", "traditional_class", target="x.Cell"),
+        },
+    )
+    cell = IommiClass(
+        qualname="x.Cell",
+        bases=[],
+        refinables={},
+        init_members=["attrs", "url", "url_title", "value", "tag"],
+    )
+    return IommiGraph(classes={c.qualname: c for c in [column, cell]})
+
+
+def test_traditional_attrs_recurses_into_html_attrs(graph_with_traditional_attrs):
+    # `Column(cell__attrs__class__pre_wrap=True)` — `attrs` is an init_member
+    # of Cell but should be treated as the html_attrs namespace, not a leaf.
+    assert walk(graph_with_traditional_attrs, "x.Column",
+                ["cell", "attrs", "class", "pre_wrap"]) is OK
+
+
+def test_traditional_attrs_style_key_ok(graph_with_traditional_attrs):
+    assert walk(graph_with_traditional_attrs, "x.Column",
+                ["cell", "attrs", "style", "color"]) is OK
+
+
+def test_traditional_attrs_direct_attribute_ok(graph_with_traditional_attrs):
+    # cell.attrs.data_thing="hi" — direct HTML attribute leaf.
+    assert walk(graph_with_traditional_attrs, "x.Column",
+                ["cell", "attrs", "data_thing"]) is OK
+
+
+def test_traditional_attrs_chain_past_class_value_fails(graph_with_traditional_attrs):
+    res = walk(graph_with_traditional_attrs, "x.Column",
+               ["cell", "attrs", "class", "pre_wrap", "deeper"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "trailing_segments_after_leaf"
+
+
+def test_traditional_attrs_chain_past_direct_attribute_fails(graph_with_traditional_attrs):
+    res = walk(graph_with_traditional_attrs, "x.Column",
+               ["cell", "attrs", "data_thing", "deeper"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "trailing_segments_after_leaf"
+
+
+def test_traditional_non_attrs_init_member_still_a_leaf(graph_with_traditional_attrs):
+    # `tag` is a normal init_member — chaining past it is still invalid.
+    res = walk(graph_with_traditional_attrs, "x.Column",
+               ["cell", "tag", "extra"])
+    assert isinstance(res, Problem)
+    assert res.outcome == "trailing_segments_after_leaf"

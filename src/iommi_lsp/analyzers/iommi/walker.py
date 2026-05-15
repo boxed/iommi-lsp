@@ -197,10 +197,11 @@ def _step_traditional(
     """Validate the chain past a ``traditional_class`` refinable.
 
     The next segment must be one of the target class's ``init_members``
-    (public ``self.X = …`` assignments in its ``__init__`` chain). Each
-    such name is a leaf — nothing legal follows. If the graph doesn't
-    know the target class or its members, bias toward OK so we don't
-    flag valid code as broken.
+    (public ``self.X = …`` assignments in its ``__init__`` chain). Most
+    such names are leaves — except ``attrs``, which is the iommi HTML
+    attribute namespace and recurses through ``class``/``style``/etc.
+    If the graph doesn't know the target class or its members, bias
+    toward OK so we don't flag valid code as broken.
     """
     remaining = chain[j:]
     if not remaining:
@@ -218,6 +219,10 @@ def _step_traditional(
             segment_index=j,
             on_class=target.qualname,
             available=tuple(target.init_members),
+        )
+    if head == _ATTRS_NAME:
+        return _step_html_attrs(
+            _synthetic_html_attrs(), chain, j + 1, parent_class=target
         )
     if len(remaining) > 1:
         return Problem(
