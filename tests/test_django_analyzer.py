@@ -662,3 +662,108 @@ def test_unused_request_local_variable_is_kept(tmp_path: Path):
     diag = _unused_diag(line, start, start + len("request"))
 
     assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def _invalid_enum_diag(line: int, col_start: int, col_end: int, name: str) -> dict:
+    """Mirror ty's ``invalid-assignment`` shape for an Enum tuple member."""
+    return {
+        "code": "invalid-assignment",
+        "message": f"Enum member `{name}` is incompatible with `__new__`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+@pytest.mark.parametrize("base", ["models.IntegerChoices", "models.TextChoices"])
+def test_choices_enum_member_invalid_assignment_is_dropped(tmp_path: Path, base: str):
+    src = (
+        "from django.db import models\n"
+        "\n"
+        f"class MyChoices({base}):\n"
+        "    GOOD = 1, \"I like this\"\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].index("GOOD")
+    diag = _invalid_enum_diag(line, start, start + len("GOOD"), "GOOD")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_choices_enum_member_bare_import(tmp_path: Path):
+    """``from django.db.models import IntegerChoices`` — bare Name base."""
+    src = (
+        "from django.db.models import IntegerChoices\n"
+        "\n"
+        "class MyChoices(IntegerChoices):\n"
+        "    GOOD = 1, \"I like this\"\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].index("GOOD")
+    diag = _invalid_enum_diag(line, start, start + len("GOOD"), "GOOD")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_invalid_assignment_outside_choices_class_is_kept(tmp_path: Path):
+    """A plain class that happens to hit ``invalid-assignment`` — keep it."""
+    src = (
+        "class Plain:\n"
+        "    x: int = \"oops\"\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    start = src.splitlines()[line].index("x")
+    diag = _invalid_enum_diag(line, start, start + 1, "x")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_invalid_assignment_non_enum_message_is_kept(tmp_path: Path):
+    """``invalid-assignment`` with a non-Enum message — keep it even inside Choices.
+
+    We only suppress ty's Enum-specific complaint; other ``invalid-assignment``
+    errors on a Choices class (e.g. a method body bug) are still real.
+    """
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class MyChoices(models.IntegerChoices):\n"
+        "    GOOD = 1, \"I like this\"\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 3
+    start = src.splitlines()[line].index("GOOD")
+    diag = {
+        "code": "invalid-assignment",
+        "message": "Type `str` is not assignable to `int`",
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("GOOD")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is False

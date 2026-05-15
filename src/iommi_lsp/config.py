@@ -50,6 +50,7 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "generated": frozenset(),              # dynamic — see ModelInfo.generated_method_names
     "orm_lookup": frozenset(),             # dynamic — see DjangoAnalyzer.additional_diagnostics
     "unused_request_param": frozenset(),   # drops ty's "`request` is unused" hint when it's the first param
+    "choices_enum": frozenset(),           # drops ty's invalid-assignment on IntegerChoices/TextChoices tuple members
 }
 
 

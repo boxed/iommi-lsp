@@ -452,6 +452,15 @@ class DjangoAnalyzer:
             except Exception:
                 _log.exception("unused-request check crashed; keeping the diagnostic")
                 return False
+        if (
+            _is_choices_enum_member_assignment(diagnostic)
+            and self.config.is_rule_enabled("choices_enum")
+        ):
+            try:
+                return self._is_in_choices_class(uri, diagnostic)
+            except Exception:
+                _log.exception("choices-enum check crashed; keeping the diagnostic")
+                return False
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -459,6 +468,27 @@ class DjangoAnalyzer:
         except Exception:
             _log.exception("analyzer crashed; keeping the diagnostic")
             return False
+
+    def _is_in_choices_class(self, uri: str, diagnostic: Diagnostic) -> bool:
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        rng = diagnostic.get("range") or {}
+        start = rng.get("start") or {}
+        line_no = int(start.get("line", 0)) + 1
+        col = int(start.get("character", 0))
+        # Synthesize a fake target node and reuse the enclosing-class
+        # walker — it only reads lineno.
+        target = ast.AST()
+        target.lineno = line_no
+        target.col_offset = col
+        cls = _enclosing_class(parsed.tree, target)
+        if cls is None:
+            return False
+        return any(_base_is_choices(b) for b in cls.bases)
 
     def _is_first_request_param(self, uri: str, diagnostic: Diagnostic) -> bool:
         path = _uri_to_path(uri)
@@ -1047,6 +1077,37 @@ def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
     # Some clients normalize ``code`` as an int; ty uses strings, but stay safe.
     if isinstance(code, dict) and code.get("value") == "unresolved-attribute":
         return True
+    return False
+
+
+_CHOICES_BASE_NAMES = frozenset({"Choices", "IntegerChoices", "TextChoices"})
+
+
+def _is_choices_enum_member_assignment(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-assignment`` on an Enum member.
+
+    ty has emitted at least two variants of this message across versions
+    (``is incompatible with __new__`` and ``value is not assignable to
+    expected type``). Both start with ``Enum member`` and share the
+    diagnostic code, so we anchor on those.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-assignment":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    return message.lstrip().startswith("Enum member")
+
+
+def _base_is_choices(base: ast.expr) -> bool:
+    if isinstance(base, ast.Name):
+        return base.id in _CHOICES_BASE_NAMES
+    if isinstance(base, ast.Attribute):
+        return base.attr in _CHOICES_BASE_NAMES
     return False
 
 
