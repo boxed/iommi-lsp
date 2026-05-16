@@ -114,3 +114,97 @@ def test_annotate_alias_kwarg_not_validated_as_field(analyzer, tmp_path: Path) -
     f.write_text(src)
     diags = analyzer.additional_diagnostics(f.as_uri())
     assert not [d for d in diags if "my_alias" in d.get("message", "")]
+
+
+# ---------------------------------------------------------------------------
+# Nested Subquery: F() inside the inner queryset must validate against the
+# inner model, not the outer .annotate() receiver. Regression for a real
+# bug where ``.annotate(x=Subquery(Slot.objects...annotate(total=Sum(
+# F('minutes') - F('overlap_minutes')))...))`` flagged ``minutes`` and
+# ``overlap_minutes`` as unknown on the outer ``Project`` model.
+# ---------------------------------------------------------------------------
+
+
+def _build_nested_subquery_workspace(tmp_path: Path) -> DjangoAnalyzer:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "__init__.py").write_text("")
+    (tmp_path / "app" / "models.py").write_text(
+        "from django.db import models\n"
+        "class Project(models.Model):\n"
+        "    project_number = models.IntegerField()\n"
+        "    start_date = models.DateField(null=True)\n"
+        "    end_date = models.DateField(null=True)\n"
+        "class Slot(models.Model):\n"
+        "    project = models.ForeignKey(Project, on_delete=models.CASCADE)\n"
+        "    date = models.DateField()\n"
+        "    minutes = models.IntegerField()\n"
+        "    overlap_minutes = models.IntegerField()\n"
+    )
+    a = DjangoAnalyzer(workspace_root=tmp_path)
+    a.django_index = build_index(tmp_path)
+    return a
+
+
+def test_nested_subquery_f_validates_against_inner_model(tmp_path: Path) -> None:
+    """``F('minutes')`` inside a Subquery whose queryset is rooted at
+    ``Slot`` must validate against Slot, not the outer Project."""
+    a = _build_nested_subquery_workspace(tmp_path)
+    src = (
+        "from django.db.models import F, OuterRef, Subquery, Sum\n"
+        "from app.models import Project, Slot\n"
+        "Project.objects.annotate(\n"
+        "    total_minutes=Subquery(\n"
+        "        Slot.objects.filter(project=OuterRef('pk'))\n"
+        "        .values('project')\n"
+        "        .annotate(total=Sum(F('minutes') - F('overlap_minutes')))\n"
+        "        .values('total')[:1],\n"
+        "    ),\n"
+        ")\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    diags = a.additional_diagnostics(f.as_uri())
+    # ``minutes`` and ``overlap_minutes`` are valid on Slot. The outer
+    # .annotate() context must not flag them against Project.
+    bad = [d for d in diags if "Project" in d.get("message", "") and (
+        "minutes" in d.get("message", "")
+    )]
+    assert not bad, [d["message"] for d in diags]
+
+
+def test_nested_subquery_inner_f_unknown_still_flagged(tmp_path: Path) -> None:
+    """The inner queryset is still validated — F('bogus') against Slot
+    is still flagged, just attributed to Slot rather than Project."""
+    a = _build_nested_subquery_workspace(tmp_path)
+    src = (
+        "from django.db.models import F, OuterRef, Subquery, Sum\n"
+        "from app.models import Project, Slot\n"
+        "Project.objects.annotate(\n"
+        "    total=Subquery(\n"
+        "        Slot.objects.filter(project=OuterRef('pk'))\n"
+        "        .annotate(total=Sum(F('bogus_field')))\n"
+        "        .values('total')[:1],\n"
+        "    ),\n"
+        ")\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    diags = a.additional_diagnostics(f.as_uri())
+    msgs = [d.get("message", "") for d in diags]
+    assert any("bogus_field" in m and "Slot" in m for m in msgs), msgs
+
+
+def test_outer_f_still_validates_against_outer_model(tmp_path: Path) -> None:
+    """Sanity: F() at the outer .annotate() level still validates against
+    the outer (Project) model. The fix should not regress this."""
+    a = _build_nested_subquery_workspace(tmp_path)
+    src = (
+        "from django.db.models import F\n"
+        "from app.models import Project\n"
+        "Project.objects.annotate(x=F('not_on_project'))\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+    diags = a.additional_diagnostics(f.as_uri())
+    msgs = [d.get("message", "") for d in diags]
+    assert any("not_on_project" in m and "Project" in m for m in msgs), msgs

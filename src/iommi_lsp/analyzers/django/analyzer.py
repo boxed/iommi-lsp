@@ -376,6 +376,12 @@ class DjangoAnalyzer:
         for stmt_pos, value in _name_assigns_in_scope(scope, var_name):
             if stmt_pos >= use_pos:
                 break
+            # ``x = x.filter(...)`` — the assign's start position is to the
+            # left of the inner ``x`` use, so the position check above
+            # would include it. But the RHS hasn't been bound yet when
+            # we're inside it, so returning this value is a self-reference.
+            if _node_contains(value, use_site):
+                continue
             last = value
         return last
 
@@ -408,9 +414,12 @@ class DjangoAnalyzer:
                     value.func.value, tree=tree, _depth=_depth + 1,
                 )
         # ``for x in NAME`` / ``[... for x in NAME]`` where NAME is itself
-        # bound to a queryset earlier in the scope. Depth-bound to avoid
-        # blowups on cyclic ``a = a`` shapes.
-        if isinstance(value, ast.Name) and tree is not None and _depth < 4:
+        # bound to a queryset earlier in the scope. Depth-bound as a
+        # safety net — ``_assignment_value_for`` skips self-referential
+        # assigns so each back-walk step moves strictly earlier in the
+        # file. Realistic ``qs = qs.filter(...)`` chains are short; this
+        # bound mostly protects against pathological inputs.
+        if isinstance(value, ast.Name) and tree is not None and _depth < 32:
             bound = self._assignment_value_for(value.id, value, tree)
             if bound is not None:
                 return self._infer_iter_yields_model(
@@ -990,7 +999,7 @@ class DjangoAnalyzer:
                 for arg in node.args[1:]:
                     for q_kwargs in _iter_q_kwargs(arg):
                         yield from self._validate_kwargs(parsed, model, q_kwargs)
-                yield from self._validate_f_calls(model, node)
+                yield from self._validate_f_calls(model, node, tree=parsed.tree)
                 continue
             if not isinstance(node.func, ast.Attribute):
                 continue
@@ -1025,7 +1034,9 @@ class DjangoAnalyzer:
                     parsed, model, node.args, method, aliases=aliases,
                 )
             # F('field__path') anywhere in the call's args/kwargs.
-            yield from self._validate_f_calls(model, node, aliases=aliases)
+            yield from self._validate_f_calls(
+                model, node, aliases=aliases, tree=parsed.tree,
+            )
 
     def _helper_first_arg_model(
         self, arg: ast.AST, tree: ast.Module,
@@ -1101,11 +1112,18 @@ class DjangoAnalyzer:
     def _validate_f_calls(
         self, model: ModelInfo, call: ast.Call,
         aliases: frozenset[str] = frozenset(),
+        tree: ast.Module | None = None,
     ):
-        """Find F('field__path') anywhere in *call*'s arg/kwarg subtrees."""
+        """Find F('field__path') anywhere in *call*'s arg/kwarg subtrees.
+
+        Skips subtrees rooted at a nested manager-rooted queryset chain
+        (e.g. ``Subquery(Other.objects.filter(...).annotate(...))``) —
+        those inner method calls are scanned independently by
+        ``_scan_lookups`` against their own model.
+        """
         seen: set[int] = set()
         for sub in _iter_arg_subtrees(call):
-            for fnode in ast.walk(sub):
+            for fnode in self._walk_skipping_nested_querysets(sub, tree):
                 if not isinstance(fnode, ast.Call) or not _is_f_call(fnode):
                     continue
                 key = id(fnode)
@@ -1125,6 +1143,29 @@ class DjangoAnalyzer:
                     diag = _string_problem_to_diagnostic(arg0, chain, 0, result)
                     if diag is not None:
                         yield diag
+
+    def _walk_skipping_nested_querysets(
+        self, node: ast.AST, tree: ast.Module | None,
+    ):
+        """Like ``ast.walk`` but prunes at nested queryset method calls.
+
+        A nested ``Other.objects.filter(...)`` chain inside a
+        ``Subquery``/``Exists``/``Case(When(...))`` etc. has its own
+        scope; F() inside it should validate against ``Other``, not the
+        outer model. ``_scan_lookups`` visits every Call node, so we can
+        rely on the inner chain being processed on its own iteration.
+        """
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if (
+                tree is not None
+                and isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and self._root_manager_model(child.func.value, tree) is not None
+            ):
+                # Nested queryset chain — handled separately.
+                continue
+            yield from self._walk_skipping_nested_querysets(child, tree)
 
     def _validate_kwargs(
         self,

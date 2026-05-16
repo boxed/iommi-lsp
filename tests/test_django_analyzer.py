@@ -559,6 +559,72 @@ def test_for_loop_target_resolves_receiver(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_comprehension_over_reassigned_queryset_resolves_receiver(tmp_path: Path):
+    """``authors = authors.filter(...)`` then ``for a in authors`` in a
+    comprehension. The receiver ``a`` must still resolve to ``Author`` so
+    reverse-FK accessors like ``a.articles`` are recognised. Previously
+    the back-walk for ``authors`` picked up the self-referential
+    ``authors = authors.filter(...)`` value and hit the depth limit.
+    """
+    src = (
+        "from blog.models import Author\n"
+        "\n"
+        "def f(flag):\n"
+        "    authors = Author.objects.filter(name='a')\n"
+        "    if flag:\n"
+        "        authors = authors.filter(name='b')\n"
+        "    return [a.articles for a in authors]\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 6
+    text = src.splitlines()[line]
+    start = text.index(".articles") + 1
+    diag = _diag(line, start, start + len("articles"), "articles")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_reverse_on_multi_branch_reassigned_queryset_in_nested_comp(tmp_path: Path):
+    """The full user-reported shape: ``if/elif`` reassignments of the
+    queryset, then a multi-generator comprehension whose first generator
+    binds ``a`` and whose second generator uses ``a.articles`` (a reverse
+    FK). Two reassignments push the back-walk past the original
+    ``_depth < 4`` cap in ``_infer_iter_yields_model``.
+    """
+    src = (
+        "from blog.models import Author\n"
+        "\n"
+        "def f(flavour):\n"
+        "    authors = Author.objects.filter(name='a')\n"
+        "    if flavour == 'x':\n"
+        "        authors = authors.filter(name='b')\n"
+        "    elif flavour == 'y':\n"
+        "        authors = authors.filter(name='c')\n"
+        "    return [\n"
+        "        x\n"
+        "        for a in authors\n"
+        "        for x in a.articles.all()\n"
+        "    ]\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "related_names")
+    a.django_index = build_index(CORPUS / "related_names")
+
+    line = 11  # `        for x in a.articles.all()`
+    text = src.splitlines()[line]
+    start = text.index(".articles") + 1
+    diag = _diag(line, start, start + len("articles"), "articles")
+
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
 def test_reverse_relation_is_dropped(tmp_path: Path):
     src = (
         "from blog.models import Author\n"
