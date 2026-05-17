@@ -157,7 +157,12 @@ A Django and iommi language server that proxies to
   dropped before they reach the editor. Real bugs survive. Custom
   manager methods surfaced via `objects = MyQuerySet.as_manager()` or
   a `models.Manager` subclass are picked up workspace-wide so
-  `Order.objects.<custom_method>()` stops nagging too.
+  `Order.objects.<custom_method>()` stops nagging too. Aliases declared
+  by `.annotate(name=...)` / `.alias(name=...)` survive across the
+  receiver's whole chain — `qs = User.objects.annotate(n=Count('id'));
+  for u in qs: u.n` no longer trips `unresolved-attribute` on `u.n`,
+  even across rebindings and through `.get(...)` / `.first(...)` /
+  `for ... in qs` bindings.
 
 * **`get_user_model()` awareness.** `UserCls = get_user_model();
   UserCls.objects.filter(...)` resolves the binding to the contrib
@@ -354,9 +359,10 @@ manager = ["mongo", "search"]            # treat these as Manager-like attrs
 ```
 
 Recognised rule groups: `manager`, `meta`, `pk`, `exception`, `fk_id`,
-`reverse`, `generated`, `orm_lookup`, `unused_request_param`. Unknown
-groups in `disabled_rules` are ignored with a stderr warning rather
-than silently breaking the filter.
+`reverse`, `generated`, `orm_lookup`, `unused_request_param`,
+`choices_enum`, `f_operator`, `annotate`. Unknown groups in
+`disabled_rules` are ignored with a stderr warning rather than silently
+breaking the filter.
 
 A missing or malformed `pyproject.toml` falls back to defaults; the
 proxy never crashes on a bad config.

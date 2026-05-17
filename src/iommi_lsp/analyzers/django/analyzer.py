@@ -240,6 +240,15 @@ class DjangoAnalyzer:
         if self._is_manager_method_access(receiver, attr_name, parsed.tree):
             return True
 
+        # ``for obj in M.objects.annotate(x=…): obj.x`` — the annotated
+        # alias is a real attribute at runtime but invisible to ty. Walk
+        # the receiver's queryset chain (across local rebindings) and
+        # suppress when the attr matches a declared alias.
+        if self.config.is_rule_enabled("annotate"):
+            aliases = self._resolve_receiver_aliases(receiver, parsed.tree)
+            if attr_name in aliases:
+                return True
+
         return False
 
     def _is_manager_method_access(
@@ -543,6 +552,102 @@ class DjangoAnalyzer:
             return self._infer_iter_yields_model(value.func.value, tree=tree)
         return None
 
+    def _resolve_receiver_aliases(
+        self, receiver: ast.AST, tree: ast.Module
+    ) -> frozenset[str]:
+        """Annotation aliases contributed to the receiver's queryset chain.
+
+        Parallel to :meth:`_resolve_receiver_model` — walks the same flow
+        (comprehension targets + local-variable assignments + chained
+        queryset methods) but collects the kwarg names declared by every
+        ``annotate``/``alias`` call along the way. The result is the set
+        of names that would be valid attribute accesses on an instance
+        pulled out of that queryset, even though they are not declared
+        fields on the model.
+
+        ``aggregate`` is excluded — it returns a dict, not a queryset, so
+        no instance ever carries its aliases.
+        """
+        if not isinstance(receiver, ast.Name):
+            return frozenset()
+        var_name = receiver.id
+
+        scope = _enclosing_function(tree, receiver)
+        if scope is None:
+            scope = tree
+        use_pos = (
+            getattr(receiver, "lineno", 0),
+            getattr(receiver, "col_offset", 0),
+        )
+
+        for node in _comprehensions_in_scope(scope):
+            if not _node_contains(node, receiver):
+                continue
+            for gen in node.generators:
+                if isinstance(gen.target, ast.Name) and gen.target.id == var_name:
+                    return self._aliases_from_iter(gen.iter, tree=tree)
+
+        last_match: frozenset[str] = frozenset()
+        for stmt_pos, kind, value in _name_bindings_in_scope(scope, var_name):
+            if stmt_pos >= use_pos:
+                break
+            if kind == "call":
+                collected = self._aliases_from_call_result(value, tree=tree)
+            else:
+                collected = self._aliases_from_iter(value, tree=tree)
+            if collected:
+                last_match = collected
+        return last_match
+
+    def _aliases_from_iter(
+        self,
+        value: ast.AST,
+        *,
+        tree: ast.Module | None = None,
+        _depth: int = 0,
+    ) -> frozenset[str]:
+        """Aliases declared by ``annotate``/``alias`` in an iterable's chain.
+
+        Walks the same shapes as :meth:`_infer_iter_yields_model`: a
+        manager/queryset-method chain, or a Name bound earlier in scope
+        to such a chain (``qs = M.objects.annotate(x=…); for o in qs``).
+        """
+        if _depth > 32:
+            return frozenset()
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+            method = value.func.attr
+            if method not in _QUERY_METHODS_RETURNING_QUERYSET:
+                return frozenset()
+            aliases: set[str] = set()
+            if method in _AGGREGATE_METHODS:
+                for kw in value.keywords:
+                    if kw.arg:
+                        aliases.add(kw.arg)
+            aliases |= self._aliases_from_iter(
+                value.func.value, tree=tree, _depth=_depth + 1,
+            )
+            return frozenset(aliases)
+        if isinstance(value, ast.Name) and tree is not None:
+            bound = self._assignment_value_for(value.id, value, tree)
+            if bound is not None:
+                return self._aliases_from_iter(
+                    bound, tree=tree, _depth=_depth + 1,
+                )
+        return frozenset()
+
+    def _aliases_from_call_result(
+        self,
+        value: ast.AST,
+        *,
+        tree: ast.Module | None = None,
+    ) -> frozenset[str]:
+        """Aliases for ``x = qs.<terminal>()`` instance-yielding bindings."""
+        if isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute):
+            method = value.func.attr
+            if method in _QUERY_METHODS_RETURNING_INSTANCE:
+                return self._aliases_from_iter(value.func.value, tree=tree)
+        return frozenset()
+
     def _attr_is_magic(self, model: ModelInfo, attr_name: str) -> bool:
         cfg = self.config
 
@@ -606,6 +711,15 @@ class DjangoAnalyzer:
             except Exception:
                 _log.exception("f-operator check crashed; keeping the diagnostic")
                 return False
+        if (
+            _is_relation_field_assignment_message(diagnostic)
+            and self.config.is_rule_enabled("relation_field_assignment")
+        ):
+            try:
+                return self._is_relation_field_assignment(uri, diagnostic)
+            except Exception:
+                _log.exception("relation-field-assignment check crashed; keeping the diagnostic")
+                return False
         if not _is_unresolved_attribute(diagnostic):
             return False
         try:
@@ -658,6 +772,29 @@ class DjangoAnalyzer:
         if op_node is None:
             return False
         return _op_involves_combinable(op_node)
+
+    def _is_relation_field_assignment(self, uri: str, diagnostic: Diagnostic) -> bool:
+        """Suppress ty's ``invalid-assignment`` for Django relation-field
+        declarations like ``project: Project = ForeignKey(Project, ...)``.
+
+        Django installs a descriptor for ``ForeignKey``/``OneToOneField``/
+        ``ManyToManyField`` so the class attribute returns an instance of
+        the related model at access time. ty doesn't model the descriptor,
+        so when the field has a model-type annotation it complains that
+        ``ForeignKey[...]`` isn't assignable to e.g. ``Project``. The
+        diagnostic range points at the RHS call — we verify that call is
+        a relation-field constructor before swallowing the warning.
+        """
+        path = _uri_to_path(uri)
+        if path is None:
+            return False
+        parsed = self._parse(uri, path)
+        if parsed is None:
+            return False
+        call = _find_call_at(parsed.tree, diagnostic.get("range") or {})
+        if call is None:
+            return False
+        return _call_is_relation_field(call)
 
     def _is_first_request_param(self, uri: str, diagnostic: Diagnostic) -> bool:
         path = _uri_to_path(uri)
@@ -1585,6 +1722,52 @@ def _find_op_at(tree: ast.Module, range_: dict) -> ast.AST | None:
             best = node
             best_size = size
     return best
+
+
+def _is_relation_field_assignment_message(diagnostic: Diagnostic) -> bool:
+    """Match ty's ``invalid-assignment`` whose RHS type is a relation field.
+
+    ty's message shape: ``Object of type `ForeignKey` is not assignable to
+    `Project```. With django-stubs the type may show generic params, e.g.
+    ``ForeignKey[Unknown, Unknown]``. We anchor on the canonical relation
+    field type names and verify the AST shape in
+    :meth:`DjangoAnalyzer._is_relation_field_assignment`.
+    """
+    code = diagnostic.get("code")
+    code_value = code if isinstance(code, str) else (
+        code.get("value") if isinstance(code, dict) else None
+    )
+    if code_value != "invalid-assignment":
+        return False
+    message = diagnostic.get("message")
+    if not isinstance(message, str):
+        return False
+    if "Object of type `" not in message:
+        return False
+    return any(f"`{name}" in message for name in RELATION_FIELD_NAMES)
+
+
+def _find_call_at(tree: ast.Module, range_: dict) -> ast.Call | None:
+    """Find an ``ast.Call`` node starting at the LSP range's start position."""
+    start = range_.get("start") or {}
+    s_line = int(start.get("line", 0)) + 1
+    s_col = int(start.get("character", 0))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if node.lineno == s_line and node.col_offset == s_col:
+            return node
+    return None
+
+
+def _call_is_relation_field(call: ast.Call) -> bool:
+    """Whether *call* is ``ForeignKey(...)`` / ``models.ForeignKey(...)`` etc."""
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id in RELATION_FIELD_NAMES
+    if isinstance(func, ast.Attribute):
+        return func.attr in RELATION_FIELD_NAMES
+    return False
 
 
 def _is_unused_request(diagnostic: Diagnostic) -> bool:

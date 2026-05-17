@@ -52,6 +52,8 @@ RULE_GROUPS: dict[str, frozenset[str]] = {
     "unused_request_param": frozenset(),   # drops ty's "`request` is unused" hint when it's the first param
     "choices_enum": frozenset(),           # drops ty's invalid-assignment on IntegerChoices/TextChoices tuple members
     "f_operator": frozenset(),             # drops ty's unsupported-operator on F()/Combinable arithmetic
+    "annotate": frozenset(),               # drops ty's unresolved-attribute on annotate()/alias() aliases
+    "relation_field_assignment": frozenset(),  # drops ty's invalid-assignment on ForeignKey/OneToOneField/ManyToManyField field declarations
 }
 
 

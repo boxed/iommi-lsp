@@ -1456,3 +1456,325 @@ def test_invalid_assignment_non_enum_message_is_kept(tmp_path: Path):
         "source": "ty",
     }
     assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+# -- annotate() alias suppression --------------------------------------------
+
+
+def test_annotate_alias_on_for_loop_instance_is_dropped(tmp_path: Path):
+    """``for u in User.objects.annotate(n=…): u.n`` — ty doesn't know
+    ``n`` is added at runtime; we walk the queryset chain bound by the
+    ``for`` and recognise the alias."""
+    src = (
+        "from django.db.models import Count\n"
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    for u in User.objects.annotate(n=Count('id')):\n"
+        "        print(u.n)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 5
+    col = src.splitlines()[line].index("u.n") + 2
+    diag = _diag(line, col, col + 1, "n")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_annotate_alias_via_qs_variable_is_dropped(tmp_path: Path):
+    """Cross-statement: ``qs = M.objects.annotate(n=…); for u in qs: u.n``
+    — the alias resolver walks back through the ``qs`` binding."""
+    src = (
+        "from django.db.models import Count\n"
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    qs = User.objects.annotate(n=Count('id'))\n"
+        "    for u in qs:\n"
+        "        print(u.n)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 6
+    col = src.splitlines()[line].index("u.n") + 2
+    diag = _diag(line, col, col + 1, "n")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_annotate_alias_on_get_result_is_dropped(tmp_path: Path):
+    """``u = M.objects.annotate(n=…).get(...); u.n`` — terminal queryset
+    method binds an instance; alias still resolves through the chain."""
+    src = (
+        "from django.db.models import Count\n"
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    u = User.objects.annotate(n=Count('id')).get(pk=1)\n"
+        "    return u.n\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 5
+    col = src.splitlines()[line].index("u.n") + 2
+    diag = _diag(line, col, col + 1, "n")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_annotate_alias_across_rebinding_is_dropped(tmp_path: Path):
+    """``qs = M.objects.annotate(n=…); qs = qs.filter(...); for u in qs: u.n``
+    — alias survives a subsequent rebinding to a filter chain."""
+    src = (
+        "from django.db.models import Count\n"
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    qs = User.objects.annotate(n=Count('id'))\n"
+        "    qs = qs.filter(email__contains='@')\n"
+        "    for u in qs:\n"
+        "        print(u.n)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 7
+    col = src.splitlines()[line].index("u.n") + 2
+    diag = _diag(line, col, col + 1, "n")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_alias_method_works_same_as_annotate(tmp_path: Path):
+    """``.alias(x=…)`` declares the same kind of name as ``.annotate(x=…)``."""
+    src = (
+        "from django.db.models import Count\n"
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    for u in User.objects.alias(n=Count('id')):\n"
+        "        print(u.n)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 5
+    col = src.splitlines()[line].index("u.n") + 2
+    diag = _diag(line, col, col + 1, "n")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_non_alias_attr_on_annotated_qs_is_kept(tmp_path: Path):
+    """A truly unknown attr on an annotated instance is still flagged."""
+    src = (
+        "from django.db.models import Count\n"
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    for u in User.objects.annotate(n=Count('id')):\n"
+        "        print(u.bogus)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 5
+    col = src.splitlines()[line].index("u.bogus") + 2
+    diag = _diag(line, col, col + len("bogus"), "bogus")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_annotate_rule_disabled_keeps_diagnostic(tmp_path: Path):
+    from iommi_lsp.config import Config
+
+    src = (
+        "from django.db.models import Count\n"
+        "from myapp.models import User\n"
+        "\n"
+        "def f():\n"
+        "    for u in User.objects.annotate(n=Count('id')):\n"
+        "        print(u.n)\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(
+        workspace_root=CORPUS / "basic_django",
+        config=Config(disabled_rules=frozenset({"annotate"})),
+    )
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 5
+    col = src.splitlines()[line].index("u.n") + 2
+    diag = _diag(line, col, col + 1, "n")
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+# -- relation field declaration suppression ----------------------------------
+
+
+def _relation_field_diag(line: int, col_start: int, col_end: int, type_name: str, target: str = "Project") -> dict:
+    """Mirror ty's ``invalid-assignment`` for ``f: Target = RelationField(...)``."""
+    return {
+        "code": "invalid-assignment",
+        "message": f"Object of type `{type_name}` is not assignable to `{target}`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+
+
+@pytest.mark.parametrize(
+    "field_type",
+    ["ForeignKey", "OneToOneField", "ManyToManyField"],
+)
+def test_relation_field_assignment_diagnostic_is_dropped(tmp_path: Path, field_type: str):
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Project(models.Model):\n"
+        "    name = models.CharField(max_length=100)\n"
+        "\n"
+        "class Task(models.Model):\n"
+        f"    project: \"Project\" = models.{field_type}(Project, on_delete=models.CASCADE)\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 6
+    col_start = src.splitlines()[line].index(f"models.{field_type}")
+    col_end = col_start + len(src.splitlines()[line]) - col_start
+    diag = _relation_field_diag(line, col_start, col_end, field_type)
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_relation_field_assignment_with_generic_params_is_dropped(tmp_path: Path):
+    """django-stubs renders the type as ``ForeignKey[Unknown, Unknown]``."""
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Project(models.Model):\n"
+        "    name = models.CharField(max_length=100)\n"
+        "\n"
+        "class Task(models.Model):\n"
+        "    project: \"Project\" = models.ForeignKey(Project, on_delete=models.CASCADE)\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 6
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("models.ForeignKey")
+    col_end = len(line_text)
+    diag = _relation_field_diag(line, col_start, col_end, "ForeignKey[Unknown, Unknown]")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_relation_field_assignment_bare_import_is_dropped(tmp_path: Path):
+    """``from django.db.models import ForeignKey`` — bare ``Name`` call."""
+    src = (
+        "from django.db import models\n"
+        "from django.db.models import ForeignKey, CASCADE\n"
+        "\n"
+        "class Project(models.Model):\n"
+        "    name = models.CharField(max_length=100)\n"
+        "\n"
+        "class Task(models.Model):\n"
+        "    project: \"Project\" = ForeignKey(Project, on_delete=CASCADE)\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 7
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("ForeignKey(")
+    col_end = len(line_text)
+    diag = _relation_field_diag(line, col_start, col_end, "ForeignKey")
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_invalid_assignment_on_non_relation_field_is_kept(tmp_path: Path):
+    """Non-relation invalid-assignment on a class body — keep it."""
+    src = (
+        "class Plain:\n"
+        "    x: int = \"oops\"\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("\"oops\"")
+    col_end = col_start + len("\"oops\"")
+    diag = {
+        "code": "invalid-assignment",
+        "message": "Object of type `str` is not assignable to `int`",
+        "range": {
+            "start": {"line": line, "character": col_start},
+            "end": {"line": line, "character": col_end},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_relation_field_rule_disabled_keeps_diagnostic(tmp_path: Path):
+    from iommi_lsp.config import Config
+
+    src = (
+        "from django.db import models\n"
+        "\n"
+        "class Project(models.Model):\n"
+        "    name = models.CharField(max_length=100)\n"
+        "\n"
+        "class Task(models.Model):\n"
+        "    project: \"Project\" = models.ForeignKey(Project, on_delete=models.CASCADE)\n"
+    )
+    f = tmp_path / "m.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(
+        workspace_root=CORPUS / "basic_django",
+        config=Config(disabled_rules=frozenset({"relation_field_assignment"})),
+    )
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 6
+    line_text = src.splitlines()[line]
+    col_start = line_text.index("models.ForeignKey")
+    col_end = len(line_text)
+    diag = _relation_field_diag(line, col_start, col_end, "ForeignKey")
+    assert a.is_false_positive(f.as_uri(), diag) is False
