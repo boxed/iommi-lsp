@@ -486,6 +486,128 @@ def test_explicit_pk_field_name_on_annotated_param_is_dropped(tmp_path: Path):
     assert a.is_false_positive(f.as_uri(), diag) is True
 
 
+def test_message_based_fallback_suppresses_pk_on_unannotated_param(tmp_path: Path):
+    """ty-semantic infers a model type for receivers we can't reach from
+    the AST (e.g. an ``@decode_path``-wrapped view's ``project=None``
+    kwarg). The receiver is a bare ``Name`` with no annotation and no
+    in-scope assignment, so AST-based resolution returns nothing — but
+    ty's own message names the type: ``Object of type `User` has no
+    attribute `id```. The fallback parses that name and re-runs the
+    magic-attr check against the index.
+    """
+    src = (
+        "def view(request, *, user=None):\n"
+        "    return user.id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    start = src.splitlines()[line].index("user.id")
+    diag = {
+        "code": "unresolved-attribute",
+        "message": "Object of type `User` has no attribute `id`",
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("user.id")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
+def test_message_based_fallback_keeps_diagnostic_for_explicit_pk_model(tmp_path: Path):
+    """``.id`` on an explicit-PK model is a real bug — the fallback must
+    still respect that by running ``_attr_is_magic``, which returns False
+    here.
+    """
+    src = (
+        "def view(request, *, x=None):\n"
+        "    return x.id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    start = src.splitlines()[line].index("x.id")
+    diag = {
+        "code": "unresolved-attribute",
+        "message": "Object of type `WithExplicitPK` has no attribute `id`",
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("x.id")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_message_based_fallback_keeps_diagnostic_for_unknown_type(tmp_path: Path):
+    """A type name that isn't in the index falls through — we'd rather
+    leak noise than suppress a real attribute error on a non-model class.
+    """
+    src = (
+        "def view(*, x=None):\n"
+        "    return x.id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    start = src.splitlines()[line].index("x.id")
+    diag = {
+        "code": "unresolved-attribute",
+        "message": "Object of type `NotAModel` has no attribute `id`",
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("x.id")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is False
+
+
+def test_message_based_fallback_handles_legacy_quoted_format(tmp_path: Path):
+    """Older ty variants spelled the type ``Type "User" has no attribute
+    "id"``. Same receiver shape, same expected outcome.
+    """
+    src = (
+        "def view(*, user=None):\n"
+        "    return user.id\n"
+    )
+    f = tmp_path / "u.py"
+    f.write_text(src)
+
+    a = DjangoAnalyzer(workspace_root=CORPUS / "basic_django")
+    a.django_index = build_index(CORPUS / "basic_django")
+
+    line = 1
+    start = src.splitlines()[line].index("user.id")
+    diag = {
+        "code": "unresolved-attribute",
+        "message": 'Type "User" has no attribute "id"',
+        "range": {
+            "start": {"line": line, "character": start},
+            "end": {"line": line, "character": start + len("user.id")},
+        },
+        "severity": 1,
+        "source": "ty",
+    }
+    assert a.is_false_positive(f.as_uri(), diag) is True
+
+
 def test_id_on_explicit_pk_annotated_param_is_kept(tmp_path: Path):
     """``.id`` on an explicit-PK instance is a real bug — Django does
     not inject ``id`` when the model declares ``primary_key=True``

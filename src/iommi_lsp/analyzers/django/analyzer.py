@@ -18,6 +18,7 @@ suppress a real bug.
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -248,6 +249,16 @@ class DjangoAnalyzer:
             aliases = self._resolve_receiver_aliases(receiver, parsed.tree)
             if attr_name in aliases:
                 return True
+
+        # Last-resort fallback: ty's message names the receiver's inferred
+        # type (``Object of type `Project` has no attribute `id```). When
+        # AST-based resolution fails — e.g. ty-semantic infers a model
+        # type through decorator wrapping or other channels the AST
+        # doesn't expose — trust the type name from the message itself
+        # and rerun the magic-attr check against it.
+        msg_model = self._resolve_via_message(diagnostic.get("message"))
+        if msg_model is not None and self._attr_is_magic(msg_model, attr_name):
+            return True
 
         return False
 
@@ -498,6 +509,31 @@ class DjangoAnalyzer:
                 if model is not None:
                     last_match = model
         return last_match
+
+    def _resolve_via_message(self, message: object) -> ModelInfo | None:
+        """Resolve a model from the inferred type ty named in its message.
+
+        ty-semantic emits ``Object of type `Project` has no attribute `id```
+        even for receivers we can't reach from the AST (decorator-wrapped
+        params with no annotation, etc.). Older variants spell it
+        ``Type "Project" has no attribute "id"``. We treat the named type
+        as a model when ``django_index`` recognises it; an unknown name
+        falls through and the diagnostic is kept.
+        """
+        if not isinstance(message, str):
+            return None
+        m = _TY_RECEIVER_TYPE_RE.search(message)
+        if m is None:
+            return None
+        # Strip generic suffix like ``list[Project]`` → ``Project``: ty
+        # may quote the full inferred type and the bare class name is
+        # what the index keys on. Also dotted-qualified names get tailed.
+        raw = _ty_receiver_type_name(m)
+        tail = raw.rsplit(".", 1)[-1]
+        bracket = tail.find("[")
+        if bracket != -1:
+            tail = tail[:bracket]
+        return self.django_index.lookup(tail)
 
     def _model_from_annotation(self, ann: ast.AST | None) -> ModelInfo | None:
         if ann is None:
@@ -1583,6 +1619,19 @@ def _is_unresolved_attribute(diagnostic: Diagnostic) -> bool:
     if isinstance(code, dict) and code.get("value") == "unresolved-attribute":
         return True
     return False
+
+
+# ty spells the inferred receiver type two ways across versions:
+#   * ``Object of type `Project` has no attribute `id``` (ty-semantic)
+#   * ``Type "Project" has no attribute "id"`` (older)
+# Both anchor at the start of the message; one capture group covers both.
+_TY_RECEIVER_TYPE_RE = re.compile(r'(?:Object of type `([^`]+)`|Type "([^"]+)")')
+
+
+# The single capture group above doesn't work for two alternatives — use
+# a small wrapper that returns whichever group matched.
+def _ty_receiver_type_name(match: re.Match) -> str:
+    return match.group(1) or match.group(2)
 
 
 _CHOICES_BASE_NAMES = frozenset({"Choices", "IntegerChoices", "TextChoices"})
